@@ -16,10 +16,11 @@ import seaborn as sns
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score # balanced_accuracy_score
 from matplotlib import rc
-from setproctitle import setproctitle
+#from setproctitle import setproctitle
 import matplotlib.pyplot as plt
 import random
 
+from rtpt.rtpt import RTPT
 from models import ProtopNetNLP
 
 sns.set(style='ticks', palette='Set2')
@@ -27,6 +28,12 @@ sns.despine()
 rc('text', usetex=True)
 
 mpl.rcParams['savefig.pad_inches'] = 0
+
+# Create RTPT object
+rtpt = RTPT(name_initials='KK', experiment_name='ScriptName', max_iterations=100)
+
+# Start the RTPT tracking
+rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="train", type=str,
@@ -39,8 +46,8 @@ parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=20, type=int,
                     help='Batch size')
-# parser.add_argument('--test_epoch', default=10, type=int,
-#                     help='After how many epochs should the model be evaluated on the test data?')
+parser.add_argument('--test_epoch', default=10, type=int,
+                    help='After how many epochs should the model be evaluated on the test data?')
 parser.add_argument('--data-dir', default='data/rt-polarity',
                     help='Train data in format defined by --data-io param.')
 parser.add_argument('--num-prototypes', default=80,
@@ -64,8 +71,7 @@ def get_args(args):
         args.device = "cuda"
     return args
 
-def get_data(args):
-    set = args.mode
+def get_data(args, set='train'):
     set_dir = []
     # f_names = ['rt-polarity.neg', 'rt-polarity.pos']
 
@@ -120,10 +126,19 @@ def convert_label(labels, gpu):
             converted_labels[i] = 0
     return converted_labels.cuda(gpu)
 
-def train(args):
-    global proctitle
+def save_checkpoint(save_dir, state, epoch, best, run_id, filename='checkpoint.pth.tar'):
+    save_path_checkpoint = os.path.join(os.path.join(save_dir, run_id), filename)
+    os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
+    if epoch % 10 == 0:
+        torch.save(state, save_path_checkpoint)
+    if best:
+        torch.save(state, save_path_checkpoint.replace('checkpoint.pth.tar', 'best_model.pth.tar'))
 
-    text, labels = get_data(args)
+def train(args):
+    #global proctitle
+
+    text, labels = get_data(args, args.mode)
+    text_val, labels_val = get_data(args, 'val')
     model = ProtopNetNLP(args)
     # init = model.init_protos(self, args, text_train, labels_train)
 
@@ -139,7 +154,7 @@ def train(args):
     model.train()
     num_epochs = args.num_epochs
     for epoch in tqdm(range(num_epochs)):
-        setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
+        #setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
         all_preds = []
         all_labels = []
         losses_per_batch = []
@@ -148,6 +163,9 @@ def train(args):
         r2_loss_per_batch = []
         text_batches, label_batches = get_train_batches(text, labels, args.batch_size)
 
+        # Update the RTPT
+        rtpt.step(subtitle=f"epoch={epoch}")
+        
         for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
             optimizer.zero_grad()
 
@@ -179,6 +197,20 @@ def train(args):
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
 
+            # if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
+            #     model.eval()
+            #
+            #     save_checkpoint(save_dir, {
+            #         'epoch': epoch + 1,
+            #         'state_dict': model.state_dict(),
+            #         'optimizer': optimizer.state_dict(),
+            #         'hyper_params': hyperparams,
+            #         # 'eval_acc': 100 * correct / total,
+            #         'eval_bal_acc': eval_bal_acc,
+            #     }, epoch + 1, best=eval_bal_acc >= best_acc, run_id=run_id)
+            #     if eval_bal_acc >= best_acc:
+            #         best_acc = eval_bal_acc
+
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
@@ -206,9 +238,9 @@ if __name__ == '__main__':
     #args = get_args(args)
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
-    global proctitle
-    proctitle = "Prototype learning"
-    setproctitle(proctitle + args.mode + " | warming up")
+    # global proctitle
+    # proctitle = "Prototype learning"
+    # setproctitle(proctitle + args.mode + " | warming up")
     if args.mode == 'train':
         train(args)
     # elif args.mode == 'test':
