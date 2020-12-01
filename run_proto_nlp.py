@@ -17,7 +17,7 @@ from sklearn.metrics import accuracy_score # balanced_accuracy_score
 from matplotlib import rc
 import matplotlib.pyplot as plt
 import random
-import uuid
+import datetime
 
 from rtpt.rtpt import RTPT
 from models import ProtopNetNLP
@@ -85,7 +85,7 @@ def get_data(args, set='train'):
     labels = pickle.load( open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
     return text, labels
 
-def get_train_batches(text, labels, batch_size=10):
+def get_batches(text, labels, batch_size=10):
     def divide_chunks(l, n):
         for i in range(0, len(l), n):
             yield l[i:i + n]
@@ -124,18 +124,18 @@ def convert_label(labels, gpu):
             converted_labels[i] = 0
     return converted_labels.cuda(gpu)
 
-def save_checkpoint(save_dir, state, best, run_id, filename='best_model.pth.tar'):
+def save_checkpoint(save_dir, state, best, filename='best_model.pth.tar'):
     if best:
-        save_path_checkpoint = os.path.join(os.path.join(save_dir, run_id), filename)
+        save_path_checkpoint = os.path.join(os.path.join(save_dir, str(datetime.datetime.now())), filename)
         os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
         torch.save(state, save_path_checkpoint.replace('best_model.pth.tar', 'best_model.pth.tar'))
 
 def train(args):
-    run_id = args.mode + '_' + str(uuid.uuid1())
     save_dir = "./runs/results/"
 
     text, labels = get_data(args, args.mode)
     text_val, labels_val = get_data(args, 'val')
+    text_test, labels_test = get_data(args, 'test')
     model = ProtopNetNLP(args)
     # init = model.init_protos(self, args, text_train, labels_train)
 
@@ -147,7 +147,8 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
-    text_val_batches, label_val_batches = get_train_batches(text_val, labels_val, args.batch_size)
+    text_val_batches, label_val_batches = get_batches(text_val, labels_val, args.batch_size)
+    text_test_batches, label_test_batches = get_batches(text_test, labels_test, args.batch_size)
 
     model.train()
     num_epochs = args.num_epochs
@@ -161,7 +162,7 @@ def train(args):
         # ce_loss_per_batch = []
         # r1_loss_per_batch = []
         # r2_loss_per_batch = []
-        text_batches, label_batches = get_train_batches(text, labels, args.batch_size)
+        text_batches, label_batches = get_batches(text, labels, args.batch_size)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
@@ -237,13 +238,41 @@ def train(args):
                 'hyper_params': args,
                 # 'eval_acc': 100 * correct / total,
                 'acc_val': acc_val,
-            }, best=acc_val >= best_acc, run_id=run_id)
+            }, best=acc_val >= best_acc)
             if acc_val >= best_acc:
                 best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+
+    # final test evaluation
+    model.eval()
+    losses_per_batch_test = []
+    all_labels_test = []
+    all_preds_test = []
+    with torch.no_grad():
+        for i, (text_test_batch, label_test_batch) in enumerate(zip(text_test_batches, label_test_batches)):
+            outputs = model.forward(text_test_batch, args.gpu)
+            prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+
+            # compute individual losses and backward step
+            label_test_batch = convert_label(label_test_batch, args.gpu)
+            ce_loss = ce_crit(predicted_label, label_test_batch)
+            r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
+            loss = ce_loss + \
+                   args.lambda2 * r1_loss + \
+                   args.lambda3 * r2_loss
+
+            _, predicted = torch.max(predicted_label.data, 1)
+            all_preds_test += predicted.cpu().numpy().tolist()
+            all_labels_test += label_val_batch.cpu().numpy().tolist()
+
+            # store losses
+            losses_per_batch_test.append(float(loss))
+    mean_loss = np.mean(losses_per_batch_test)
+    acc_test = accuracy_score(all_labels_test, all_preds_test)
+    print("final test evaluation: mean loss {:.4f}, acc_test {:.4f}".format(mean_loss, 100 * acc_test))
 
 def transform_space(X):
     fig = plt.figure()
