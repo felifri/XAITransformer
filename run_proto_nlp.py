@@ -228,7 +228,7 @@ def train(args):
 
                     mean_loss = np.mean(losses_per_batch)
                     acc_val = accuracy_score(all_labels_val, all_preds_val)
-                    print("Epoch {}, mean loss per batch {:.4f}, validation acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+                    print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(mean_loss, 100 * acc_val))
 
                 save_checkpoint(save_dir, {
                     'epoch': epoch + 1,
