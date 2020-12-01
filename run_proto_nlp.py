@@ -228,7 +228,7 @@ def train(args):
 
                     mean_loss = np.mean(losses_per_batch)
                     acc_val = accuracy_score(all_labels_val, all_preds_val)
-                    print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+                    print("Epoch {}, mean loss per batch {:.4f}, validation acc {:.4f}".format(epoch, mean_loss, 100 * acc))
 
                 save_checkpoint(save_dir, {
                     'epoch': epoch + 1,
@@ -237,13 +237,13 @@ def train(args):
                     'hyper_params': args,
                     # 'eval_acc': 100 * correct / total,
                     'acc_val': acc_val,
-                }, epoch + 1, best=acc_val >= best_acc, run_id=run_id)
+                }, best=acc_val >= best_acc, run_id=run_id)
                 if acc_val >= best_acc:
                     best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
-        print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+        print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
 
 def transform_space(X):
     fig = plt.figure()
