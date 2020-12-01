@@ -9,9 +9,9 @@ from sklearn.cluster import KMeans
 
 class ProtopNetNLP(nn.Module):
     def __init__(self, args):
-        super(ProtopNetNLP, self).__init__(args.gpu)
+        super(ProtopNetNLP, self).__init__()
 
-        self.device = args.device #'cuda'
+        #self.device = args.device #'cuda'
         self.sentBert = SentenceTransformer('distilbert-base-nli-mean-tokens')
         # tensor of prototype feature vectors
         self.protolayer = nn.Parameter(torch.nn.init.uniform_(torch.empty((args.num_prototypes, args.enc_size),
