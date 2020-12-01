@@ -124,9 +124,9 @@ def convert_label(labels, gpu):
             converted_labels[i] = 0
     return converted_labels.cuda(gpu)
 
-def save_checkpoint(save_dir, state, best, id, filename='best_model.pth.tar'):
+def save_checkpoint(save_dir, state, best, run_id, filename='best_model.pth.tar'):
     if best:
-        save_path_checkpoint = os.path.join(os.path.join(save_dir, id), filename)
+        save_path_checkpoint = os.path.join(os.path.join(save_dir, run_id), filename)
         os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
         torch.save(state, save_path_checkpoint.replace('best_model.pth.tar', 'best_model.pth.tar'))
 
