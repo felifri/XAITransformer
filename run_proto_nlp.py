@@ -111,6 +111,14 @@ class ProtoLoss:
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
         return r1_loss, r2_loss
 
+def convert_label(labels, gpu):
+    converted_labels = torch.empty(len(labels),1)
+    for i,label in enumerate(labels):
+        if label=='pos':
+            converted_labels[i] = 1
+        elif label=='neg':
+            converted_labels[i] = 0
+    return converted_labels.cuda(gpu)
 
 def train(args):
     global proctitle
@@ -149,6 +157,7 @@ def train(args):
             prototype_distances, feature_vector_distances, predicted_label, _ = outputs
 
             # compute individual losses and backward step
+            label_batch = convert_label(label_batch, args.gpu)
             ce_loss = ce_crit(predicted_label, label_batch)
             r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
             loss = ce_loss + \
