@@ -158,9 +158,9 @@ def train(args):
         all_preds = []
         all_labels = []
         losses_per_batch = []
-        ce_loss_per_batch = []
-        r1_loss_per_batch = []
-        r2_loss_per_batch = []
+        # ce_loss_per_batch = []
+        # r1_loss_per_batch = []
+        # r2_loss_per_batch = []
         text_batches, label_batches = get_train_batches(text, labels, args.batch_size)
 
         # Update the RTPT
@@ -190,56 +190,56 @@ def train(args):
 
             # store losses
             losses_per_batch.append(float(loss))
-            ce_loss_per_batch.append(float(ce_loss))
-            r1_loss_per_batch.append(float(r1_loss))
-            r2_loss_per_batch.append(float(r2_loss))
+            # ce_loss_per_batch.append(float(ce_loss))
+            # r1_loss_per_batch.append(float(r1_loss))
+            # r2_loss_per_batch.append(float(r2_loss))
 
-            if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
-                model.eval()
-                losses_per_batch = []
-                ce_loss_per_batch = []
-                r1_loss_per_batch = []
-                r2_loss_per_batch = []
-                all_labels_val = []
-                all_preds_val = []
-                with torch.no_grad():
-                    for i, (text_val_batch, label_val_batch) in enumerate(zip(text_val_batches, label_val_batches)):
+        if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
+            model.eval()
+            losses_per_batch_val = []
+            # ce_loss_per_batch = []
+            # r1_loss_per_batch = []
+            # r2_loss_per_batch = []
+            all_labels_val = []
+            all_preds_val = []
+            with torch.no_grad():
+                for i, (text_val_batch, label_val_batch) in enumerate(zip(text_val_batches, label_val_batches)):
 
-                        outputs = model.forward(text_val_batch, args.gpu)
-                        prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+                    outputs = model.forward(text_val_batch, args.gpu)
+                    prototype_distances, feature_vector_distances, predicted_label, _ = outputs
 
-                        # compute individual losses and backward step
-                        label_val_batch = convert_label(label_val_batch, args.gpu)
-                        ce_loss = ce_crit(predicted_label, label_val_batch)
-                        r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
-                        loss = ce_loss + \
-                               args.lambda2 * r1_loss + \
-                               args.lambda3 * r2_loss
+                    # compute individual losses and backward step
+                    label_val_batch = convert_label(label_val_batch, args.gpu)
+                    ce_loss = ce_crit(predicted_label, label_val_batch)
+                    r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
+                    loss = ce_loss + \
+                           args.lambda2 * r1_loss + \
+                           args.lambda3 * r2_loss
 
-                        _, predicted = torch.max(predicted_label.data, 1)
-                        all_preds_val += predicted.cpu().numpy().tolist()
-                        all_labels_val += label_val_batch.cpu().numpy().tolist()
+                    _, predicted = torch.max(predicted_label.data, 1)
+                    all_preds_val += predicted.cpu().numpy().tolist()
+                    all_labels_val += label_val_batch.cpu().numpy().tolist()
 
-                        # store losses
-                        losses_per_batch.append(float(loss))
-                        ce_loss_per_batch.append(float(ce_loss))
-                        r1_loss_per_batch.append(float(r1_loss))
-                        r2_loss_per_batch.append(float(r2_loss))
+                    # store losses
+                    losses_per_batch_val.append(float(loss))
+                    # ce_loss_per_batch.append(float(ce_loss))
+                    # r1_loss_per_batch.append(float(r1_loss))
+                    # r2_loss_per_batch.append(float(r2_loss))
 
-                mean_loss = np.mean(losses_per_batch)
-                acc_val = accuracy_score(all_labels_val, all_preds_val)
-                print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(mean_loss, 100 * acc_val))
+            mean_loss_val = np.mean(losses_per_batch_val)
+            acc_val = accuracy_score(all_labels_val, all_preds_val)
+            print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(mean_loss_val, 100 * acc_val))
 
-                save_checkpoint(save_dir, {
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'hyper_params': args,
-                    # 'eval_acc': 100 * correct / total,
-                    'acc_val': acc_val,
-                }, best=acc_val >= best_acc, run_id=run_id)
-                if acc_val >= best_acc:
-                    best_acc = acc_val
+            save_checkpoint(save_dir, {
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'hyper_params': args,
+                # 'eval_acc': 100 * correct / total,
+                'acc_val': acc_val,
+            }, best=acc_val >= best_acc, run_id=run_id)
+            if acc_val >= best_acc:
+                best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
