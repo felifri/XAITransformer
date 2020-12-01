@@ -115,11 +115,7 @@ class ProtoLoss:
 def train(args):
     global proctitle
 
-    text_train, labels_train = get_data(args, set='train')
-    # text_test, labels_test =get_data(args, set='test')
-
-    num_epochs = args.num_epochs
-
+    text, labels = get_data(args)
     model = ProtopNetNLP(args)
     # init = model.init_protos(self, args, text_train, labels_train)
 
@@ -133,6 +129,7 @@ def train(args):
     interp_criteria = ProtoLoss()
 
     model.train()
+    num_epochs = args.num_epochs
     for epoch in tqdm(range(num_epochs)):
         setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
         all_preds = []
@@ -140,7 +137,7 @@ def train(args):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        text_batches, label_batches = get_train_batches(text_train, labels_train, args.batch_size)
+        text_batches, label_batches = get_train_batches(text, labels, args.batch_size)
 
         for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
             optimizer.zero_grad()
@@ -172,7 +169,7 @@ def train(args):
             r2_loss_per_batch.append(float(r2_loss))
 
         mean_loss = np.mean(losses_per_batch)
-        acc = accuracy_score(labels_train, all_preds)
+        acc = accuracy_score(labels, all_preds)
         print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
 
 def transform_space(X):
