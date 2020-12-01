@@ -142,10 +142,10 @@ def train(args):
         for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
             optimizer.zero_grad()
 
-            text_batch = text_batch.cuda(args.gpu)
+            #text_batch = text_batch.cuda(args.gpu)
             label_batch = label_batch.cuda(args.gpu)
 
-            outputs = model.forward(text_batch)
+            outputs = model.forward(text_batch, args.gpu)
             prototype_distances, feature_vector_distances, predicted_label, _ = outputs
 
             # compute individual losses and backward step

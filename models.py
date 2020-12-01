@@ -26,9 +26,9 @@ class ProtopNetNLP(nn.Module):
             # torch.nn.Softmax(dim=1)
         )
 
-    def forward(self, x):
+    def forward(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True)
-
+        embedding = embedding.cuda(gpu)
         prototype_distances = torch.cdist(embedding, self.protolayer, p=2)# get prototype distances
         feature_vector_distances = torch.cdist(self.protolayer, embedding, p=2) # get feature vector distances
 
