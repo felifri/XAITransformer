@@ -9,16 +9,15 @@ import pickle
 import numpy as np
 import os
 import torch
-# import uuid
 import argparse
 import matplotlib as mpl
 import seaborn as sns
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score # balanced_accuracy_score
 from matplotlib import rc
-#from setproctitle import setproctitle
 import matplotlib.pyplot as plt
 import random
+import uuid
 
 from rtpt.rtpt import RTPT
 from models import ProtopNetNLP
@@ -30,8 +29,7 @@ rc('text', usetex=True)
 mpl.rcParams['savefig.pad_inches'] = 0
 
 # Create RTPT object
-rtpt = RTPT(name_initials='KK', experiment_name='ScriptName', max_iterations=100)
-
+rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
 # Start the RTPT tracking
 rtpt.start()
 
@@ -126,16 +124,15 @@ def convert_label(labels, gpu):
             converted_labels[i] = 0
     return converted_labels.cuda(gpu)
 
-def save_checkpoint(save_dir, state, epoch, best, run_id, filename='checkpoint.pth.tar'):
-    save_path_checkpoint = os.path.join(os.path.join(save_dir, run_id), filename)
-    os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-    if epoch % 10 == 0:
-        torch.save(state, save_path_checkpoint)
+def save_checkpoint(save_dir, state, best, id, filename='best_model.pth.tar'):
     if best:
-        torch.save(state, save_path_checkpoint.replace('checkpoint.pth.tar', 'best_model.pth.tar'))
+        save_path_checkpoint = os.path.join(os.path.join(save_dir, id), filename)
+        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
+        torch.save(state, save_path_checkpoint.replace('best_model.pth.tar', 'best_model.pth.tar'))
 
 def train(args):
-    #global proctitle
+    run_id = args.mode + '_' + str(uuid.uuid1())
+    save_dir = "./runs/results/"
 
     text, labels = get_data(args, args.mode)
     text_val, labels_val = get_data(args, 'val')
@@ -144,12 +141,13 @@ def train(args):
 
     num_params = sum(p.numel() for p in model.parameters())
     print("Number of parameters {}".format(num_params))
-    print("Running on {}".format(args.gpu))
+    print("Running on gpu {}".format(args.gpu))
     model.cuda(args.gpu)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
+    text_val_batches, label_val_batches = get_train_batches(text_val, labels_val, args.batch_size)
 
     model.train()
     num_epochs = args.num_epochs
@@ -165,12 +163,9 @@ def train(args):
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
-        
+
         for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
             optimizer.zero_grad()
-
-            #text_batch = text_batch.cuda(args.gpu)
-            #label_batch = label_batch.cuda(args.gpu)
 
             outputs = model.forward(text_batch, args.gpu)
             prototype_distances, feature_vector_distances, predicted_label, _ = outputs
@@ -197,19 +192,52 @@ def train(args):
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
 
-            # if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
-            #     model.eval()
-            #
-            #     save_checkpoint(save_dir, {
-            #         'epoch': epoch + 1,
-            #         'state_dict': model.state_dict(),
-            #         'optimizer': optimizer.state_dict(),
-            #         'hyper_params': hyperparams,
-            #         # 'eval_acc': 100 * correct / total,
-            #         'eval_bal_acc': eval_bal_acc,
-            #     }, epoch + 1, best=eval_bal_acc >= best_acc, run_id=run_id)
-            #     if eval_bal_acc >= best_acc:
-            #         best_acc = eval_bal_acc
+            if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
+                model.eval()
+                losses_per_batch = []
+                ce_loss_per_batch = []
+                r1_loss_per_batch = []
+                r2_loss_per_batch = []
+                all_labels_val = []
+                all_preds_val = []
+                with torch.no_grad():
+                    for i, (text_val_batch, label_val_batch) in enumerate(zip(text_val_batches, label_val_batches)):
+
+                        outputs = model.forward(text_val_batch, args.gpu)
+                        prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+
+                        # compute individual losses and backward step
+                        label_val_batch = convert_label(label_val_batch, args.gpu)
+                        ce_loss = ce_crit(predicted_label, label_val_batch)
+                        r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
+                        loss = ce_loss + \
+                               args.lambda2 * r1_loss + \
+                               args.lambda3 * r2_loss
+
+                        _, predicted = torch.max(predicted_label.data, 1)
+                        all_preds_val += predicted.cpu().numpy().tolist()
+                        all_labels_val += label_val_batch.cpu().numpy().tolist()
+
+                        # store losses
+                        losses_per_batch.append(float(loss))
+                        ce_loss_per_batch.append(float(ce_loss))
+                        r1_loss_per_batch.append(float(r1_loss))
+                        r2_loss_per_batch.append(float(r2_loss))
+
+                    mean_loss = np.mean(losses_per_batch)
+                    acc_val = accuracy_score(all_labels_val, all_preds_val)
+                    print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+
+                save_checkpoint(save_dir, {
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'hyper_params': args,
+                    # 'eval_acc': 100 * correct / total,
+                    'acc_val': acc_val,
+                }, epoch + 1, best=acc_val >= best_acc, run_id=run_id)
+                if acc_val >= best_acc:
+                    best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
@@ -235,12 +263,10 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     args = parser.parse_args()
-    #args = get_args(args)
+
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
-    # global proctitle
-    # proctitle = "Prototype learning"
-    # setproctitle(proctitle + args.mode + " | warming up")
+
     if args.mode == 'train':
         train(args)
     # elif args.mode == 'test':
