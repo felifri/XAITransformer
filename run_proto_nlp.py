@@ -151,6 +151,8 @@ def train(args):
 
     model.train()
     num_epochs = args.num_epochs
+    print("\nStarting training for {} epochs\n".format(num_epochs))
+    best_acc = 0
     for epoch in tqdm(range(num_epochs)):
         #setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
         all_preds = []
@@ -191,9 +193,7 @@ def train(args):
             ce_loss_per_batch.append(float(ce_loss))
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
-            
-            print("\nStarting training for {} epochs\n".format(num_epochs))
-            best_acc = 0
+
             if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
                 model.eval()
                 losses_per_batch = []
