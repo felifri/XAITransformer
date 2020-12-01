@@ -125,7 +125,7 @@ def train(args):
     model.cuda(args.gpu)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(args.device))
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
 
     model.train()
