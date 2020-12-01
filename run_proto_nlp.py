@@ -51,7 +51,7 @@ parser.add_argument('--lambda3', default=0.1,
                     help='weight for prototype loss computation')
 parser.add_argument('--num-classes', default=2,
                     help='How many classes are to be classified?')
-parser.add_argument('--class_weights', default=0.5,
+parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
 parser.add_argument('--enc_size', default=768,
                     help='embedding size of sentence/ word encoding')
@@ -112,7 +112,7 @@ class ProtoLoss:
         return r1_loss, r2_loss
 
 def convert_label(labels, gpu):
-    converted_labels = torch.empty(len(labels),1)
+    converted_labels = torch.empty(len(labels))
     for i,label in enumerate(labels):
         if label=='pos':
             converted_labels[i] = 1
