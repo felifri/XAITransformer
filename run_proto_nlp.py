@@ -55,8 +55,6 @@ parser.add_argument('--class_weights', default=0.5,
                     help='Class weight for cross entropy loss')
 parser.add_argument('--enc_size', default=768,
                     help='embedding size of sentence/ word encoding')
-parser.add_argument('--device', default="cuda",
-                    help='embedding size of sentence/ word encoding')
 parser.add_argument('--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
 
 def get_args(args):
@@ -66,9 +64,8 @@ def get_args(args):
         args.device = "cuda"
     return args
 
-def get_data(args, set='train'):
-        #def read_train_dev_test(self, args):
-
+def get_data(args):
+    set = args.mode
     set_dir = []
     # f_names = ['rt-polarity.neg', 'rt-polarity.pos']
 
@@ -148,8 +145,8 @@ def train(args):
         for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
             optimizer.zero_grad()
 
-            text_batch = text_batch.to(args.device)
-            label_batch = label_batch.to(args.device)
+            text_batch = text_batch.cuda(args.gpu)
+            label_batch = label_batch.cuda(args.gpu)
 
             outputs = model.forward(text_batch)
             prototype_distances, feature_vector_distances, predicted_label, _ = outputs
