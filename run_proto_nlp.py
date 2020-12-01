@@ -55,7 +55,9 @@ parser.add_argument('--class_weights', default=0.5,
                     help='Class weight for cross entropy loss')
 parser.add_argument('--enc_size', default=768,
                     help='embedding size of sentence/ word encoding')
-
+parser.add_argument('--device', default="cuda",
+                    help='embedding size of sentence/ word encoding')
+parser.add_argument('--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
 
 def get_args(args):
     if args.cpu:
@@ -196,7 +198,9 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     args = parser.parse_args()
-    args = get_args(args)
+    #args = get_args(args)
+    if args.gpu >= 0:
+        torch.cuda.set_device(args.gpu)
     global proctitle
     proctitle = "Prototype learning"
     setproctitle(proctitle + args.mode + " | warming up")
