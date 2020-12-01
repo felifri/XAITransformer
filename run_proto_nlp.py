@@ -14,7 +14,7 @@ import argparse
 import matplotlib as mpl
 import seaborn as sns
 from tqdm import tqdm
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import accuracy_score # balanced_accuracy_score
 from matplotlib import rc
 from setproctitle import setproctitle
 import matplotlib.pyplot as plt
@@ -31,15 +31,13 @@ mpl.rcParams['savefig.pad_inches'] = 0
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="train", type=str,
                     help='What do you want to do? Select either train, test, full_image_test, attention')
-parser.add_argument('-d', '--data', required=True, type=str,
-                    help='Which data setting do you want to use? e.g. standard')
-parser.add_argument('--lr', required=True, type=float, default=0.01,
+parser.add_argument('--lr', type=float, default=0.01,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
                     help='whether to use cpu')
-parser.add_argument('-e', '--num_epochs', required=True, type=int,
+parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', required=True, type=int,
+parser.add_argument('-bs', '--batch_size', default=20, type=int,
                     help='Batch size')
 # parser.add_argument('--test_epoch', default=10, type=int,
 #                     help='After how many epochs should the model be evaluated on the test data?')
@@ -175,8 +173,8 @@ def train(args):
             r2_loss_per_batch.append(float(r2_loss))
 
         mean_loss = np.mean(losses_per_batch)
-        bal_acc = balanced_accuracy_score(labels_train, all_preds)
-        print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * bal_acc))
+        acc = accuracy_score(labels_train, all_preds)
+        print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
 
 def transform_space(X):
     fig = plt.figure()
