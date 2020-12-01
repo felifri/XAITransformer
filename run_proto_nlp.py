@@ -112,7 +112,7 @@ class ProtoLoss:
         return r1_loss, r2_loss
 
 def convert_label(labels, gpu):
-    converted_labels = torch.empty(len(labels))
+    converted_labels = torch.empty(len(labels), dtype=torch.long)
     for i,label in enumerate(labels):
         if label=='pos':
             converted_labels[i] = 1
@@ -141,6 +141,7 @@ def train(args):
     for epoch in tqdm(range(num_epochs)):
         setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
         all_preds = []
+        all_labels = []
         losses_per_batch = []
         ce_loss_per_batch = []
         r1_loss_per_batch = []
@@ -166,6 +167,7 @@ def train(args):
 
             _, predicted = torch.max(predicted_label.data, 1)
             all_preds += predicted.cpu().numpy().tolist()
+            all_labels += label_batch.cpu().numpy().tolist()
 
             loss.backward(retain_graph=True)
             # nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
@@ -178,7 +180,7 @@ def train(args):
             r2_loss_per_batch.append(float(r2_loss))
 
         mean_loss = np.mean(losses_per_batch)
-        acc = accuracy_score(labels, all_preds)
+        acc = accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss per batch {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
 
 def transform_space(X):
