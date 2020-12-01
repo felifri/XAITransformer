@@ -121,8 +121,8 @@ def train(args):
 
     num_params = sum(p.numel() for p in model.parameters())
     print("Number of parameters {}".format(num_params))
-    print("Running on {}".format(args.device))
-    model.to(args.device)
+    print("Running on {}".format(args.gpu))
+    model.cuda(args.gpu)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(args.device))
