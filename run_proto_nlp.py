@@ -81,16 +81,16 @@ def get_data(args, set='train'):
     labels = pickle.load(open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
     return text, labels
 
-def get_batches(text, labels, batch_size=10):
+def get_batches(embedding, labels, gpu, batch_size=128):
     def divide_chunks(l, n):
         for i in range(0, len(l), n):
             yield l[i:i + n]
-    tmp = list(zip(text, labels))
+    tmp = list(zip(embedding, labels))
     random.shuffle(tmp)
-    text, labels = zip(*tmp)
-    text_batches = list(divide_chunks(text, batch_size))
+    embedding, labels = zip(*tmp)
+    embedding_batches = torch.Tensor(divide_chunks(embedding, batch_size)).cuda(gpu)
     label_batches = list(divide_chunks(labels, batch_size))
-    return text_batches, label_batches
+    return embedding_batches, label_batches
 
 class ProtoLoss:
     def __init__(self):
@@ -147,7 +147,7 @@ def train(args):
     model.train()
     embedding = model.compute_embedding(text, args.gpu)
     embedding_val = model.compute_embedding(text_val, args.gpu)
-    emb_val_batches, label_val_batches = get_batches(embedding_val, labels_val, args.batch_size)
+    emb_val_batches, label_val_batches = get_batches(embedding_val, labels_val, args.batch_size, args.gpu)
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
@@ -158,7 +158,7 @@ def train(args):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        emb_batches, label_batches = get_batches(embedding, labels, args.batch_size)
+        emb_batches, label_batches = get_batches(embedding, labels, args.batch_size, args.gpu)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
