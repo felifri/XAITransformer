@@ -19,10 +19,16 @@ import matplotlib.pyplot as plt
 import random
 import datetime
 import glob
+import sys
 # from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 
-from rtpt.rtpt import RTPT
+try:
+    from rtpt.rtpt import RTPT
+except:
+    sys.path.append('../rtpt')
+    from rtpt import RTPT
+
 from models import ProtopNetNLP
 
 sns.set(style='ticks', palette='Set2')
@@ -51,18 +57,16 @@ parser.add_argument('--test_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the test data?')
 parser.add_argument('--data-dir', default='data/rt-polarity',
                     help='Train data in format defined by --data-io param.')
-parser.add_argument('--num-prototypes', default=80,
+parser.add_argument('--num-prototypes', default=80, type=int,
                     help='total number of prototypes')
-parser.add_argument('--lambda2', default=0.1,
+parser.add_argument('--lambda2', default=0.1, type=float,
                     help='weight for prototype loss computation')
-parser.add_argument('--lambda3', default=0.1,
+parser.add_argument('--lambda3', default=0.1, type=float,
                     help='weight for prototype loss computation')
 parser.add_argument('--num-classes', default=2,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('--enc_size', default=768,
-                    help='embedding size of sentence/ word encoding')
 parser.add_argument('--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
 
 def get_args(args):
@@ -133,6 +137,7 @@ def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.t
         os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
         torch.save(state, save_path_checkpoint)
 
+
 def train(args):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -162,9 +167,9 @@ def train(args):
         all_preds = []
         all_labels = []
         losses_per_batch = []
-        # ce_loss_per_batch = []
-        # r1_loss_per_batch = []
-        # r2_loss_per_batch = []
+        ce_loss_per_batch = []
+        r1_loss_per_batch = []
+        r2_loss_per_batch = []
         text_batches, label_batches = get_batches(text, labels, args.batch_size)
 
         # Update the RTPT
@@ -191,12 +196,11 @@ def train(args):
             loss.backward(retain_graph=True)
             # nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
-
             # store losses
             losses_per_batch.append(float(loss))
-            # ce_loss_per_batch.append(float(ce_loss))
-            # r1_loss_per_batch.append(float(r1_loss))
-            # r2_loss_per_batch.append(float(r2_loss))
+            ce_loss_per_batch.append(float(ce_loss))
+            r1_loss_per_batch.append(float(r1_loss))
+            r2_loss_per_batch.append(float(r2_loss))
 
         if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
@@ -245,8 +249,16 @@ def train(args):
                 best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
+        ce_mean_loss = np.mean(ce_loss_per_batch)
+        r1_mean_loss = np.mean(r1_loss_per_batch)
+        r2_mean_loss = np.mean(r2_loss_per_batch)
         acc = accuracy_score(all_labels, all_preds)
-        print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch+1, mean_loss, 100 * acc))
+        print("Epoch {}, mean loss {:.4f}, ce loss {:.4f}, r1 loss {:.4f}, r2 loss {:.4f}, train acc {:.4f}".format(epoch+1,
+                                                                                                                    mean_loss,
+                                                                                                                    ce_mean_loss,
+                                                                                                                    r1_mean_loss,
+                                                                                                                    r2_mean_loss,
+                                                                                                                    100 * acc))
 
 
 def test(args):
@@ -258,6 +270,7 @@ def test(args):
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
     model.cuda(args.gpu)
+    print(model.get_proto_weights())
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
@@ -288,17 +301,19 @@ def test(args):
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
-        txt_file = open("./experiments/test_results/prototypes.txt", "w+")
+        save_path = "./experiments/test_results/prototypes.txt"
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        txt_file = open(save_path, "w+")
         for line in proto_texts:
             txt_file.write(str(line))
             txt_file.write("\n")
         txt_file.close()
 
-        visualize_protos(embedding, prototypes, n_components=2)
-        visualize_protos(embedding, prototypes, n_components=3)
+        visualize_protos(embedding, np.array(labels), prototypes, n_components=2)
+        visualize_protos(embedding, np.array(labels), prototypes, n_components=3)
 
 
-def visualize_protos(embedding, prototypes, n_components):
+def visualize_protos(embedding, labels, prototypes, n_components):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         # visualize prototypes
@@ -312,14 +327,16 @@ def visualize_protos(embedding, prototypes, n_components):
         # X_trans = TSNE(n_components=2).fit_transform(X)
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
+        rnd_labels = labels[rnd_samples]
+        rnd_labels = ['green' if x == 'pos' else 'red' for x in rnd_labels]
         fig = plt.figure()
         if n_components==2:
             ax = fig.add_subplot(111)
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c='red',marker='x', label='data')
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c=rnd_labels,marker='x', label='data')
             ax.scatter(proto_trans[:,0],proto_trans[:,1],c='blue',marker='o',label='prototypes')
         elif n_components==3:
             ax = fig.add_subplot(111, projection='3d')
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
             ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
         ax.legend()
         fig.savefig('./experiments/test_results/proto_vis'+str(n_components)+'d.png')
