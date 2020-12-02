@@ -88,7 +88,7 @@ def get_batches(embedding, labels, gpu, batch_size=128):
     tmp = list(zip(embedding, labels))
     random.shuffle(tmp)
     embedding, labels = zip(*tmp)
-    embedding_batches = torch.Tensor(divide_chunks(embedding, batch_size)).cuda(gpu)
+    embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
     label_batches = list(divide_chunks(labels, batch_size))
     return embedding_batches, label_batches
 
@@ -246,7 +246,6 @@ def train(args):
 def test(args):
     load_path = "./experiments/train_results/*"
     model_path = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))[0]
-    test_dir = "./experiments/test_results/"
 
     model = ProtopNetNLP(args)
     checkpoint = torch.load(model_path)
