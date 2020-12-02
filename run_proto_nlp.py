@@ -288,7 +288,7 @@ def test(args):
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [text[index] for index in nearest_ids]
 
-        txt_file = open("/experiments/test_results/prototypes.txt", "w+")
+        txt_file = open("./experiments/test_results/prototypes.txt", "w+")
         txt_file.writelines(proto_texts)
         txt_file.close()
 
@@ -310,7 +310,7 @@ def test(args):
         ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
         ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
         ax.legend()
-        fig.savefig('/experiments/test_results/proto_vis.png')
+        fig.savefig('./experiments/test_results/proto_vis.png')
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
