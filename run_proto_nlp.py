@@ -10,11 +10,8 @@ import numpy as np
 import os
 import torch
 import argparse
-import matplotlib as mpl
-import seaborn as sns
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score # balanced_accuracy_score
-from matplotlib import rc
+from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 import random
 import datetime
@@ -30,12 +27,6 @@ except:
     from rtpt import RTPT
 
 from models import ProtopNetNLP
-
-sns.set(style='ticks', palette='Set2')
-sns.despine()
-rc('text', usetex=True)
-
-mpl.rcParams['savefig.pad_inches'] = 0
 
 # Create RTPT object
 rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
@@ -53,8 +44,8 @@ parser.add_argument('-e', '--num_epochs', default=5, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=128, type=int,
                     help='Batch size')
-parser.add_argument('--test_epoch', default=10, type=int,
-                    help='After how many epochs should the model be evaluated on the test data?')
+parser.add_argument('--val_epoch', default=10, type=int,
+                    help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data-dir', default='data/rt-polarity',
                     help='Train data in format defined by --data-io param.')
 parser.add_argument('--num-prototypes', default=10, type = int,
@@ -143,7 +134,6 @@ def train(args):
     text, labels = get_data(args, args.mode)
     text_val, labels_val = get_data(args, 'val')
     model = ProtopNetNLP(args)
-    # init = model.init_protos(self, args, text_train, labels_train)
 
     num_params = sum(p.numel() for p in model.parameters())
     print("Number of parameters {}".format(num_params))
@@ -153,10 +143,11 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
-    text_val_batches, label_val_batches = get_batches(text_val, labels_val, args.batch_size)
-    # text_test_batches, label_test_batches = get_batches(text_test, labels_test, args.batch_size)
 
     model.train()
+    embedding = model.compute_embedding(text, args.gpu)
+    embedding_val = model.compute_embedding(text_val, args.gpu)
+    emb_val_batches, label_val_batches = get_batches(embedding_val, labels_val, args.batch_size)
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
@@ -167,16 +158,16 @@ def train(args):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        text_batches, label_batches = get_batches(text, labels, args.batch_size)
+        emb_batches, label_batches = get_batches(embedding, labels, args.batch_size)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
 
-        for i,(text_batch,label_batch) in enumerate(zip(text_batches,label_batches)):
+        for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
             optimizer.zero_grad()
 
-            outputs = model.forward(text_batch, args.gpu)
-            prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+            outputs = model.forward(emb_batch)
+            prototype_distances, feature_vector_distances, predicted_label = outputs
 
             # compute individual losses and backward step
             label_batch = convert_label(label_batch, args.gpu)
@@ -199,16 +190,16 @@ def train(args):
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
 
-        if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
+        if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
             losses_per_batch_val = []
             all_labels_val = []
             all_preds_val = []
             with torch.no_grad():
-                for i, (text_val_batch, label_val_batch) in enumerate(zip(text_val_batches, label_val_batches)):
+                for j, (emb_val_batch, label_val_batch) in enumerate(zip(emb_val_batches, label_val_batches)):
 
-                    outputs = model.forward(text_val_batch, args.gpu)
-                    prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+                    outputs = model.forward(emb_val_batch)
+                    prototype_distances, feature_vector_distances, predicted_label = outputs
 
                     # compute individual losses and backward step
                     label_val_batch = convert_label(label_val_batch, args.gpu)
@@ -268,10 +259,12 @@ def test(args):
 
     text, labels = get_data(args, 'train')
     text_test, labels_test = get_data(args, 'test')
+    embedding = model.compute_embedding(text, args.gpu)
+    embedding_test = model.compute_embedding(text_test, args.gpu)
 
     with torch.no_grad():
-        outputs = model.forward(text_test, args.gpu)
-        prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+        outputs = model.forward(embedding_test)
+        prototype_distances, feature_vector_distances, predicted_label = outputs
 
         # compute individual losses and backward step
         labels_test = convert_label(labels_test, args.gpu)
@@ -288,7 +281,6 @@ def test(args):
         # get prototypes
         prototypes = model.get_protos()
         # "convert" prototype embedding to text (take text of nearest training sample)
-        _, _, _, embedding = model.forward(text, args.gpu)
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
@@ -336,11 +328,6 @@ def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
     nearest_ids = torch.argmin(distances, dim=0)
     return nearest_ids.cpu().numpy()
-
-def explain(args):
-    return
-    # check distance to prototypes, get prototypes that influence most
-    # get nearest sentence from train set to explain/ reason
 
 
 if __name__ == '__main__':
