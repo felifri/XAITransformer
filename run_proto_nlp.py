@@ -286,13 +286,14 @@ def test(args):
         # "convert" prototype embedding to text (of training samples)
         _, _, _, embedding = model.forward(text, args.gpu)
         nearest_ids = nearest_neighbors(embedding, prototypes)
-        proto_texts = text[nearest_ids]
+        proto_texts = [text[index] for index in nearest_ids]
 
         txt_file = open("prototypes.txt", "w+")
         txt_file.writelines(proto_texts)
         txt_file.close()
 
-
+        embedding = embedding.cpu().numpy()
+        prototypes = prototypes.cpu().numpy()
         # visualize prototypes
         pca = PCA(n_components=3)
         pca.fit(embedding)
