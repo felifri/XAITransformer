@@ -283,7 +283,7 @@ def test(args):
 
         # get prototypes
         prototypes = model.get_protos()
-        # "convert" prototype embedding to text (of training samples)
+        # "convert" prototype embedding to text (take text of nearest training sample)
         _, _, _, embedding = model.forward(text, args.gpu)
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
@@ -296,6 +296,7 @@ def test(args):
 
         visualize_protos(embedding, prototypes, n_components=2)
         visualize_protos(embedding, prototypes, n_components=3)
+
 
 def visualize_protos(embedding, prototypes, n_components):
         embedding = embedding.cpu().numpy()
@@ -310,7 +311,7 @@ def visualize_protos(embedding, prototypes, n_components):
         # alternatively apply TSNE (non-linear transformation)
         # X_trans = TSNE(n_components=2).fit_transform(X)
 
-        rnd_samples = np.random.randint(embed_trans.shape[0], size=100)
+        rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
         fig = plt.figure()
         if n_components==2:
             ax = fig.add_subplot(111)
@@ -320,10 +321,8 @@ def visualize_protos(embedding, prototypes, n_components):
             ax = fig.add_subplot(111, projection='3d')
             ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
             ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
-
         ax.legend()
         fig.savefig('./experiments/test_results/proto_vis'+str(n_components)+'d.png')
-
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
