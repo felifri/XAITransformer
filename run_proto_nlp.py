@@ -314,7 +314,7 @@ def test(args):
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
     nearest_ids = torch.argmin(distances, dim=0)
-    return nearest_ids
+    return nearest_ids.cpu().numpy()
 
 def explain(args):
     return
