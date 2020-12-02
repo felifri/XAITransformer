@@ -134,7 +134,7 @@ def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.t
         torch.save(state, save_path_checkpoint)
 
 def train(args):
-    save_dir = "./runs/results/"
+    save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     text, labels = get_data(args, args.mode)
@@ -250,9 +250,9 @@ def train(args):
 
 
 def test(args):
-    load_path = "./runs/results/*"
+    load_path = "./experiments/train_results/*"
     model_path = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))[0]
-    plot_path = os.path.join(os.path.dirname(model_path), 'plots')
+    test_dir = "./experiments/test_results/"
 
     model = ProtopNetNLP(args)
     checkpoint = torch.load(model_path)
@@ -288,7 +288,7 @@ def test(args):
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [text[index] for index in nearest_ids]
 
-        txt_file = open("prototypes.txt", "w+")
+        txt_file = open("/experiments/test_results/prototypes.txt", "w+")
         txt_file.writelines(proto_texts)
         txt_file.close()
 
@@ -310,7 +310,7 @@ def test(args):
         ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
         ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
         ax.legend()
-        fig.savefig(ax,'proto_vis.png')
+        fig.savefig('/experiments/test_results/proto_vis.png')
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
