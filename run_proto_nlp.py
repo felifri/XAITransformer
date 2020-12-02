@@ -290,7 +290,7 @@ def test(args):
 
         txt_file = open("./experiments/test_results/prototypes.txt", "w+")
         for line in proto_texts:
-            txt_file.write(line)
+            txt_file.write(str(line))
             txt_file.write("\n")
         txt_file.close()
 
