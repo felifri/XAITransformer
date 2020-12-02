@@ -289,7 +289,7 @@ def test(args):
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
         txt_file = open("./experiments/test_results/prototypes.txt", "w+")
-        for line in prototypes:
+        for line in proto_texts:
             txt_file.write(line)
             txt_file.write("\n")
         txt_file.close()
