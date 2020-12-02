@@ -286,10 +286,12 @@ def test(args):
         # "convert" prototype embedding to text (of training samples)
         _, _, _, embedding = model.forward(text, args.gpu)
         nearest_ids = nearest_neighbors(embedding, prototypes)
-        proto_texts = [text[index] for index in nearest_ids]
+        proto_texts = [[index, text[index]] for index in nearest_ids]
 
         txt_file = open("./experiments/test_results/prototypes.txt", "w+")
-        txt_file.writelines(proto_texts)
+        for line in prototypes:
+            txt_file.write(line)
+            txt_file.write("\n")
         txt_file.close()
 
         visualize_protos(embedding, prototypes, n_components=2)
