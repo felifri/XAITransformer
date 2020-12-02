@@ -284,7 +284,7 @@ def test(args):
         # get prototypes
         prototypes = model.get_protos()
         # "convert" prototype embedding to text (of training samples)
-        _, _, _, embedding = model.forward(text)
+        _, _, _, embedding = model.forward(text, args.gpu)
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = text[nearest_ids]
 
@@ -314,7 +314,7 @@ def test(args):
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
     nearest_ids = torch.argmin(distances, dim=0)
-    return nearest_ids # text[nearest_ids]
+    return nearest_ids
 
 def explain(args):
     return
