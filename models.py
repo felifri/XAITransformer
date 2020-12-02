@@ -47,7 +47,7 @@ class ProtopNetNLP(nn.Module):
         return self.protolayer
 
     def get_proto_weights(self):
-        return list(self.fc.children())[-1].weight.T.cpu().numpy()
+        return list(self.fc.children())[-1].weight.T.cpu().detach().numpy()
 
     def init_protos(self, args, text, labels):
         # init via kmeans
