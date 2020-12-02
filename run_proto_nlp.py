@@ -292,10 +292,14 @@ def test(args):
         txt_file.writelines(proto_texts)
         txt_file.close()
 
+        visualize_protos(embedding, prototypes, n_components=2)
+        visualize_protos(embedding, prototypes, n_components=3)
+
+def visualize_protos(embedding, prototypes, n_components):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         # visualize prototypes
-        pca = PCA(n_components=3)
+        pca = PCA(n_components=n_components)
         pca.fit(embedding)
         print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
         embed_trans = pca.transform(embedding)
@@ -306,11 +310,18 @@ def test(args):
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=100)
         fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
-        ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
+        if n_components==2:
+            ax = fig.add_subplot(111)
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c='red',marker='x', label='data')
+            ax.scatter(proto_trans[:,0],proto_trans[:,1],c='blue',marker='o',label='prototypes')
+        elif n_components==3:
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
+            ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
+
         ax.legend()
-        fig.savefig('./experiments/test_results/proto_vis.png')
+        fig.savefig('./experiments/test_results/proto_vis'+str(n_components)+'d.png')
+
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
