@@ -49,15 +49,15 @@ parser.add_argument('--lr', type=float, default=0.01,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
                     help='whether to use cpu')
-parser.add_argument('-e', '--num_epochs', default=100, type=int,
+parser.add_argument('-e', '--num_epochs', default=5, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=20, type=int,
+parser.add_argument('-bs', '--batch_size', default=128, type=int,
                     help='Batch size')
 parser.add_argument('--test_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the test data?')
 parser.add_argument('--data-dir', default='data/rt-polarity',
                     help='Train data in format defined by --data-io param.')
-parser.add_argument('--num-prototypes', default=80, type=int,
+parser.add_argument('--num-prototypes', default=10, type = int,
                     help='total number of prototypes')
 parser.add_argument('--lambda2', default=0.1, type=float,
                     help='weight for prototype loss computation')
@@ -78,8 +78,6 @@ def get_args(args):
 
 def get_data(args, set='train'):
     set_dir = []
-    # f_names = ['rt-polarity.neg', 'rt-polarity.pos']
-
     if set=='train':
         set_dir = os.path.join(args.data_dir, 'train')
     elif set=='val':
@@ -87,9 +85,9 @@ def get_data(args, set='train'):
     elif set=='test':
         set_dir = os.path.join(args.data_dir, 'test')
 
-    text = pickle.load( open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
+    text = pickle.load(open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
     text = [' '.join(sub_list) for sub_list in text]    #join tokenized text back for sentenceBert
-    labels = pickle.load( open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
+    labels = pickle.load(open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
     return text, labels
 
 def get_batches(text, labels, batch_size=10):
@@ -163,7 +161,6 @@ def train(args):
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
     for epoch in tqdm(range(num_epochs)):
-        #setproctitle(proctitle + args.mode + " | epoch {} of {}".format(epoch + 1, num_epochs))
         all_preds = []
         all_labels = []
         losses_per_batch = []
@@ -205,9 +202,6 @@ def train(args):
         if (epoch + 1) % args.test_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
             losses_per_batch_val = []
-            # ce_loss_per_batch = []
-            # r1_loss_per_batch = []
-            # r2_loss_per_batch = []
             all_labels_val = []
             all_preds_val = []
             with torch.no_grad():
@@ -230,9 +224,6 @@ def train(args):
 
                     # store losses
                     losses_per_batch_val.append(float(loss))
-                    # ce_loss_per_batch.append(float(ce_loss))
-                    # r1_loss_per_batch.append(float(r1_loss))
-                    # r2_loss_per_batch.append(float(r2_loss))
 
             mean_loss_val = np.mean(losses_per_batch_val)
             acc_val = accuracy_score(all_labels_val, all_preds_val)
@@ -364,8 +355,3 @@ if __name__ == '__main__':
         train(args)
     elif args.mode == 'test':
         test(args)
-    # elif args.mode == 'adapt':
-    #     adapt_prototypes(args)
-    # else:
-    #     print("Nothing to do here")
-    #     exit()
