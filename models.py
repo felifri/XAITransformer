@@ -40,6 +40,9 @@ class ProtopNetNLP(nn.Module):
 
         return (prototype_distances, feature_vector_distances, class_out, embedding)
 
+    def get_protos(self):
+        return self.protolayer
+
     def init_protos(self, args, text, labels):
         # init via kmeans
         # self.protolayer = nn.Parameter(torch.nn.init.uniform_(torch.empty((hyperparams['num_prototypes'],

@@ -125,50 +125,15 @@ def convert_label(labels, gpu):
             converted_labels[i] = 0
     return converted_labels.cuda(gpu)
 
-def save_checkpoint(save_dir, state, epoch, best, filename='checkpoint.pth.tar'):
-    time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    save_path_checkpoint = os.path.join(os.path.join(save_dir, time_stmp), filename)
-    os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-    if epoch % 10 == 0:
-        torch.save(state, save_path_checkpoint)
+def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
     if best:
-        torch.save(state, save_path_checkpoint.replace('checkpoint.pth.tar', 'best_model.pth.tar'))
-
-def test(args):
-    load_path = "./runs/results_{}/train_*".format(args.data)
-    model_path=glob.glob(os.path.join(load_path, 'best_model.pth.tar'))[0]
-
-    model = ProtopNetNLP(args)
-    checkpoint = torch.load(model_path)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.cuda(args.gpu)
-    model.eval()
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
-    interp_criteria = ProtoLoss()
-
-    text_test, labels_test = get_data(args, 'test')
-
-    with torch.no_grad():
-        outputs = model.forward(text_test, args.gpu)
-        prototype_distances, feature_vector_distances, predicted_label, _ = outputs
-
-                # compute individual losses and backward step
-        labels_test = convert_label(labels_test, args.gpu)
-        ce_loss = ce_crit(predicted_label, labels_test)
-        r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
-        loss = ce_loss + \
-               args.lambda2 * r1_loss + \
-               args.lambda3 * r2_loss
-
-        _, predicted = torch.max(predicted_label.data, 1)
-        mean_loss = np.mean(loss)
-        acc_test = accuracy_score(labels_test, predicted)
-        print("test evaluation on best model: mean loss {:.4f}, acc_test {:.4f}".format(mean_loss, 100 * acc_test))
-
-
+        save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
+        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
+        torch.save(state, save_path_checkpoint('best_model.pth.tar'))
 
 def train(args):
     save_dir = "./runs/results/"
+    time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     text, labels = get_data(args, args.mode)
     text_val, labels_val = get_data(args, 'val')
@@ -274,13 +239,52 @@ def train(args):
                 'hyper_params': args,
                 # 'eval_acc': 100 * correct / total,
                 'acc_val': acc_val,
-            }, epoch, best=acc_val >= best_acc)
+            }, time_stmp, best=acc_val >= best_acc)
             if acc_val >= best_acc:
                 best_acc = acc_val
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+
+
+def test(args):
+    load_path = "./runs/results/*"
+    model_path = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))[0]
+    plot_path = os.path.join(os.path.dirname(model_path), 'plots')
+
+    model = ProtopNetNLP(args)
+    checkpoint = torch.load(model_path)
+    model.load_state_dict(checkpoint['state_dict'])
+    model.cuda(args.gpu)
+    model.eval()
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
+    interp_criteria = ProtoLoss()
+
+    text_test, labels_test = get_data(args, 'test')
+
+    with torch.no_grad():
+        outputs = model.forward(text_test, args.gpu)
+        prototype_distances, feature_vector_distances, predicted_label, _ = outputs
+
+        # compute individual losses and backward step
+        labels_test = convert_label(labels_test, args.gpu)
+        ce_loss = ce_crit(predicted_label, labels_test)
+        r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
+        loss = ce_loss + \
+               args.lambda2 * r1_loss + \
+               args.lambda3 * r2_loss
+
+        _, predicted = torch.max(predicted_label.data, 1)
+        mean_loss = np.mean(loss)
+        acc_test = accuracy_score(labels_test, predicted)
+        print("test evaluation on best model: mean loss {:.4f}, acc_test {:.4f}".format(mean_loss, 100 * acc_test))
+
+        # get prototypes
+        prototypes = model.get_protos()
+
+        # random.sample(train_text,100)
+
 
 
 def transform_space(X):
