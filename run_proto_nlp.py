@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import random
 import datetime
 import glob
+# from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 from rtpt.rtpt import RTPT
 from models import ProtopNetNLP
@@ -237,7 +239,6 @@ def train(args):
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'hyper_params': args,
-                # 'eval_acc': 100 * correct / total,
                 'acc_val': acc_val,
             }, time_stmp, best=acc_val >= best_acc)
             if acc_val >= best_acc:
@@ -245,7 +246,7 @@ def train(args):
 
         mean_loss = np.mean(losses_per_batch)
         acc = accuracy_score(all_labels, all_preds)
-        print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch, mean_loss, 100 * acc))
+        print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch+1, mean_loss, 100 * acc))
 
 
 def test(args):
@@ -261,6 +262,7 @@ def test(args):
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
 
+    text, labels = get_data(args, 'train')
     text_test, labels_test = get_data(args, 'test')
 
     with torch.no_grad():
@@ -276,31 +278,48 @@ def test(args):
                args.lambda3 * r2_loss
 
         _, predicted = torch.max(predicted_label.data, 1)
-        mean_loss = np.mean(loss)
-        acc_test = accuracy_score(labels_test, predicted)
-        print("test evaluation on best model: mean loss {:.4f}, acc_test {:.4f}".format(mean_loss, 100 * acc_test))
+        acc_test = accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
+        print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
         # get prototypes
         prototypes = model.get_protos()
+        # "convert" prototype embedding to text (of training samples)
+        _, _, _, embedding = model.forward(text)
+        nearest_ids = nearest_neighbors(embedding, prototypes)
+        proto_texts = text[nearest_ids]
 
-        # random.sample(train_text,100)
+        txt_file = open("prototypes.txt", "w+")
+        txt_file.writelines(proto_texts)
+        txt_file.close()
 
 
+        # visualize prototypes
+        pca = PCA(n_components=3)
+        pca.fit(embedding)
+        print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
+        embed_trans = pca.transform(embedding)
+        proto_trans = pca.transform(prototypes)
 
-def transform_space(X):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    # from sklearn.manifold import TSNE
-    # X_trans = TSNE(n_components=2).fit_transform(X)
-    from sklearn.decomposition import PCA
-    X_trans = PCA(n_components=3).fit(X)
-    ax.scatter(X_trans[:,0],X_trans[:,1],X_trans[:,2])
-    plt.show()
+        # alternatively apply TSNE (non-linear transformation)
+        # X_trans = TSNE(n_components=2).fit_transform(X)
+
+        rnd_samples = np.random.randint(embed_trans.shape[0], size=100)
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c='red',marker='x', label='data')
+        ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
+        ax.legend()
+        fig.savefig(ax,'proto_vis.png')
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
     nearest_ids = torch.argmin(distances, dim=0)
     return nearest_ids # text[nearest_ids]
+
+def explain(args):
+    return
+    # check distance to prototypes, get prototypes that influence most
+    # get nearest sentence from train set to explain/ reason
 
 
 if __name__ == '__main__':
