@@ -1,4 +1,5 @@
 mnist_example/
 data/
+__pycache__/
 rtpt/
 experiments/train_results/
