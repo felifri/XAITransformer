@@ -3,7 +3,7 @@ import os
 
 
 def parse_prompts_and_continuation(tag, discrete=True):
-    dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
+    dataset_file = "./realtoxicityprompts/prompts.jsonl"
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
     prompts = pd.json_normalize(dataset['prompt'])
@@ -25,7 +25,7 @@ def parse_prompts_and_continuation(tag, discrete=True):
 
 
 def parse_full(tag, discrete=True):
-    dataset_file = "./data/realtoxicityprompts/full data.jsonl"
+    dataset_file = "./realtoxicityprompts/full data.jsonl"
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
     data = [x[0] for x in dataset['generations'].tolist()]
