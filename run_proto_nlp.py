@@ -254,7 +254,10 @@ def train(args):
 
 def test(args):
     load_path = "./experiments/train_results/*"
-    model_path = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))[0]
+    model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+    model_paths.sort()
+    model_path = model_paths[-1]
+    print("loading model:", model_path)
     test_dir = "./experiments/test_results/"
 
     model = ProtopNetNLP(args)
@@ -292,19 +295,19 @@ def test(args):
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
-        save_path = "./experiments/test_results/prototypes.txt"
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
+        #os.makedirs(os.path.dirname(save_path), exist_ok=True)
         txt_file = open(save_path, "w+")
         for line in proto_texts:
             txt_file.write(str(line))
             txt_file.write("\n")
         txt_file.close()
 
-        visualize_protos(embedding, np.array(labels), prototypes, n_components=2)
-        visualize_protos(embedding, np.array(labels), prototypes, n_components=3)
+        visualize_protos(embedding, np.array(labels), prototypes, n_components=2, save_path=os.path.dirname(save_path))
+        visualize_protos(embedding, np.array(labels), prototypes, n_components=3, save_path=os.path.dirname(save_path))
 
 
-def visualize_protos(embedding, labels, prototypes, n_components):
+def visualize_protos(embedding, labels, prototypes, n_components, save_path):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         # visualize prototypes
@@ -330,7 +333,7 @@ def visualize_protos(embedding, labels, prototypes, n_components):
             ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
             ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
         ax.legend()
-        fig.savefig('./experiments/test_results/proto_vis'+str(n_components)+'d.png')
+        fig.savefig(os.path.join(save_path, 'proto_vis'+str(n_components)+'d.png'))
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes

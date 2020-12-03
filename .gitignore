@@ -1,5 +1,6 @@
 mnist_example/
-data/
+data/rt-polarity
+data/realtoxicityprompts
 __pycache__/
 rtpt/
 experiments/train_results/
