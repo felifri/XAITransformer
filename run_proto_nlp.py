@@ -239,7 +239,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
     load_path = "./experiments/train_results/*"
     model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
     model_paths.sort()
-    model_path = model_paths[-2]
+    model_path = model_paths[-1]
     print("loading model:", model_path)
     test_dir = "./experiments/test_results/"
 
@@ -304,7 +304,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, save_path):
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
         rnd_labels = labels[rnd_samples]
-        rnd_labels = ['green' if x == 'pos' else 'red' for x in rnd_labels]
+        rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
         fig = plt.figure()
         if n_components==2:
             ax = fig.add_subplot(111)
