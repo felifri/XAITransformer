@@ -235,11 +235,11 @@ def train(args, text_train, labels_train, text_val, labels_val):
                                                                                                                     100 * acc))
 
 
-def test(args, text_train, text_test, labels_test):
+def test(args, text_train, labels_train, text_test, labels_test):
     load_path = "./experiments/train_results/*"
     model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
     model_paths.sort()
-    model_path = model_paths[-1]
+    model_path = model_paths[-2]
     print("loading model:", model_path)
     test_dir = "./experiments/test_results/"
 
@@ -284,13 +284,14 @@ def test(args, text_train, text_test, labels_test):
             txt_file.write("\n")
         txt_file.close()
 
-        visualize_protos(embedding, np.array(labels), prototypes, n_components=2, save_path=os.path.dirname(save_path))
-        visualize_protos(embedding, np.array(labels), prototypes, n_components=3, save_path=os.path.dirname(save_path))
+        embedding = embedding.cpu().numpy()
+        prototypes = prototypes.cpu().numpy()
+        labels_train = labels_train.cpu().numpy()
+        visualize_protos(embedding, labels_train, prototypes, n_components=2, save_path=os.path.dirname(save_path))
+        visualize_protos(embedding, labels_train, prototypes, n_components=3, save_path=os.path.dirname(save_path))
 
 
 def visualize_protos(embedding, labels, prototypes, n_components, save_path):
-        embedding = embedding.cpu().numpy()
-        prototypes = prototypes.cpu().numpy()
         # visualize prototypes
         pca = PCA(n_components=n_components)
         pca.fit(embedding)
@@ -337,4 +338,4 @@ if __name__ == '__main__':
     if args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
     elif args.mode == 'test':
-        test(args, text_train, text_test, labels_test)
+        test(args, text_train, labels_train, text_test, labels_test)
