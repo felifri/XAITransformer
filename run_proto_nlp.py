@@ -27,6 +27,7 @@ except:
     from rtpt import RTPT
 
 from models import ProtopNetNLP
+import data_loader
 
 # Create RTPT object
 rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
@@ -39,22 +40,24 @@ parser.add_argument('-m', '--mode', default="train", type=str,
 parser.add_argument('--lr', type=float, default=0.01,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
-                    help='whether to use cpu')
-parser.add_argument('-e', '--num_epochs', default=5, type=int,
+                    help='Whether to use cpu')
+parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=128, type=int,
                     help='Batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
-parser.add_argument('--data-dir', default='data/rt-polarity',
-                    help='Train data in format defined by --data-io param.')
-parser.add_argument('--num-prototypes', default=10, type = int,
-                    help='total number of prototypes')
+parser.add_argument('--data_dir', default='./data/rt-polarity',
+                    help='Select data path')
+parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
+                    help='Select data name')
+parser.add_argument('--num_prototypes', default=10, type = int,
+                    help='Total number of prototypes')
 parser.add_argument('--lambda2', default=0.1, type=float,
-                    help='weight for prototype loss computation')
+                    help='Weight for prototype loss computation')
 parser.add_argument('--lambda3', default=0.1, type=float,
-                    help='weight for prototype loss computation')
-parser.add_argument('--num-classes', default=2,
+                    help='Weight for prototype loss computation')
+parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
@@ -67,20 +70,6 @@ def get_args(args):
         args.device = "cuda"
     return args
 
-def get_data(args, set='train'):
-    set_dir = []
-    if set=='train':
-        set_dir = os.path.join(args.data_dir, 'train')
-    elif set=='val':
-        set_dir = os.path.join(args.data_dir, 'dev')
-    elif set=='test':
-        set_dir = os.path.join(args.data_dir, 'test')
-
-    text = pickle.load(open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
-    text = [' '.join(sub_list) for sub_list in text]    #join tokenized text back for sentenceBert
-    labels = pickle.load(open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
-    return text, labels
-
 def get_batches(embedding, labels, gpu, batch_size=128):
     def divide_chunks(l, n):
         for i in range(0, len(l), n):
@@ -89,7 +78,7 @@ def get_batches(embedding, labels, gpu, batch_size=128):
     random.shuffle(tmp)
     embedding, labels = zip(*tmp)
     embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
-    label_batches = list(divide_chunks(labels, batch_size))
+    label_batches = list(divide_chunks(torch.stack(labels), batch_size))
     return embedding_batches, label_batches
 
 class ProtoLoss:
@@ -111,28 +100,33 @@ class ProtoLoss:
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
         return r1_loss, r2_loss
 
-def convert_label(labels, gpu):
-    converted_labels = torch.empty(len(labels), dtype=torch.long)
-    for i,label in enumerate(labels):
-        if label=='pos':
-            converted_labels[i] = 1
-        elif label=='neg':
-            converted_labels[i] = 0
-    return converted_labels.cuda(gpu)
-
 def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
     if best:
         save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
         os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
         torch.save(state, save_path_checkpoint)
 
+def split_data(text, labels):
+    split = [0.7,0.1,0.2]
+    idx = [round(elem*len(text)) for elem in split]
+    idx = np.cumsum(idx)
+    tmp = list(zip(text, labels))
+    random.shuffle(tmp)
+    text, labels = zip(*tmp)
+    labels = torch.stack(labels)
+    text_train = text[:idx[0]]
+    labels_train = labels[:idx[0]]
+    text_val = text[idx[0]:idx[1]]
+    labels_val = labels[idx[0]:idx[1]]
+    text_test = text[idx[1]:idx[2]]
+    labels_test = labels[idx[1]:idx[2]]
+    return text_train, labels_train, text_val, labels_val, text_test, labels_test
 
-def train(args):
+
+def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    text, labels = get_data(args, args.mode)
-    text_val, labels_val = get_data(args, 'val')
     model = ProtopNetNLP(args)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -145,7 +139,7 @@ def train(args):
     interp_criteria = ProtoLoss()
 
     model.train()
-    embedding = model.compute_embedding(text, args.gpu)
+    embedding = model.compute_embedding(text_train, args.gpu)
     embedding_val = model.compute_embedding(text_val, args.gpu)
     emb_val_batches, label_val_batches = get_batches(embedding_val, labels_val, args.batch_size, args.gpu)
     num_epochs = args.num_epochs
@@ -158,7 +152,7 @@ def train(args):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        emb_batches, label_batches = get_batches(embedding, labels, args.batch_size, args.gpu)
+        emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size, args.gpu)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
@@ -170,7 +164,6 @@ def train(args):
             prototype_distances, feature_vector_distances, predicted_label = outputs
 
             # compute individual losses and backward step
-            label_batch = convert_label(label_batch, args.gpu)
             ce_loss = ce_crit(predicted_label, label_batch)
             r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
             loss = ce_loss + \
@@ -202,7 +195,6 @@ def train(args):
                     prototype_distances, feature_vector_distances, predicted_label = outputs
 
                     # compute individual losses and backward step
-                    label_val_batch = convert_label(label_val_batch, args.gpu)
                     ce_loss = ce_crit(predicted_label, label_val_batch)
                     r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
                     loss = ce_loss + \
@@ -243,7 +235,7 @@ def train(args):
                                                                                                                     100 * acc))
 
 
-def test(args):
+def test(args, text_train, text_test, labels_test):
     load_path = "./experiments/train_results/*"
     model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
     model_paths.sort()
@@ -260,9 +252,7 @@ def test(args):
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
 
-    text, labels = get_data(args, 'train')
-    text_test, labels_test = get_data(args, 'test')
-    embedding = model.compute_embedding(text, args.gpu)
+    embedding = model.compute_embedding(text_train, args.gpu)
     embedding_test = model.compute_embedding(text_test, args.gpu)
 
     with torch.no_grad():
@@ -270,7 +260,6 @@ def test(args):
         prototype_distances, feature_vector_distances, predicted_label = outputs
 
         # compute individual losses and backward step
-        labels_test = convert_label(labels_test, args.gpu)
         ce_loss = ce_crit(predicted_label, labels_test)
         r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
         loss = ce_loss + \
@@ -341,7 +330,11 @@ if __name__ == '__main__':
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
 
+    text, labels = data_loader.load_data(args)
+    labels = torch.LongTensor(labels).cuda(args.gpu)
+    text_train, labels_train, text_val, labels_val, text_test, labels_test = split_data(text, labels)
+
     if args.mode == 'train':
-        train(args)
+        train(args, text_train, labels_train, text_val, labels_val)
     elif args.mode == 'test':
-        test(args)
+        test(args, text_train, text_test, labels_test)

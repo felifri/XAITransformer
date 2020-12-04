@@ -1,17 +1,13 @@
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
-import math
-import numpy as np
-from sklearn.cluster import KMeans
+
 
 
 class ProtopNetNLP(nn.Module):
     def __init__(self, args):
         super(ProtopNetNLP, self).__init__()
 
-        #self.device = args.device #'cuda'
         self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens')
         enc_size = self.sentBert.get_sentence_embedding_dimension()
         for param in self.sentBert.parameters():
