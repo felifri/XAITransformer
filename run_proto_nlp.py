@@ -62,6 +62,8 @@ parser.add_argument('--num_classes', default=2, type=int,
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
 parser.add_argument('--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
+parser.add_argument('--one_shot', type=bool, default=False,
+                    help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 
 def get_args(args):
     if args.cpu:
@@ -322,6 +324,11 @@ if __name__ == '__main__':
     text, labels = data_loader.load_data(args)
     labels = torch.LongTensor(labels).cuda(args.gpu)
     text_train, labels_train, text_val, labels_val, text_test, labels_test = split_data(text, labels)
+
+    if args.one_shot == True:
+        idx = random.sample(range(len(text_train)),100)
+        text_train = list(text_train[i] for i in idx)
+        labels_train = [labels_train[i] for i in idx]
 
     if args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
