@@ -5,7 +5,6 @@ https://www.aaai.org/ocs/index.php/AAAI/AAAI18/paper/viewFile/17082/16552
 CUDA_VISIBLE_DEVICES=0 python main_attention.py --mode train --data standard --batch_size 128 --lr 0.0001 --num_epochs 2 --n_splits 5 --split 0 --fp_data /home/ml-wstammer/WS/datasets/plantpheno_berry/t4/whiteref_norm/mean/parsed/ --perc_pxl_per_sample 10
 """
 
-import pickle
 import numpy as np
 import os
 import torch
@@ -17,7 +16,7 @@ import random
 import datetime
 import glob
 import sys
-# from sklearn.manifold import TSNE
+from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 
 try:
@@ -35,8 +34,8 @@ rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_ite
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('-m', '--mode', default="train", type=str,
-                    help='What do you want to do? Select either train, test, full_image_test, attention')
+parser.add_argument('-m', '--mode', default="normal", type=str,
+                    help='What do you want to do? Select either normal, train, test,')
 parser.add_argument('--lr', type=float, default=0.01,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
@@ -53,26 +52,22 @@ parser.add_argument('--data_name', default='reviews', type=str, choices=['review
                     help='Select data name')
 parser.add_argument('--num_prototypes', default=10, type = int,
                     help='Total number of prototypes')
-parser.add_argument('--lambda2', default=0.1, type=float,
+parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype loss computation')
-parser.add_argument('--lambda3', default=0.1, type=float,
+parser.add_argument('-l3','--lambda3', default=0.1, type=float,
                     help='Weight for prototype loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
+parser.add_argument('-g','--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
+parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE'],
+                    help='Which transformation should be used to visualize the prototypes')
 
-def get_args(args):
-    if args.cpu:
-        args.device = "cpu"
-    else:
-        args.device = "cuda"
-    return args
 
-def get_batches(embedding, labels, gpu, batch_size=128):
+def get_batches(embedding, labels, batch_size=128):
     def divide_chunks(l, n):
         for i in range(0, len(l), n):
             yield l[i:i + n]
@@ -143,7 +138,6 @@ def train(args, text_train, labels_train, text_val, labels_val):
     model.train()
     embedding = model.compute_embedding(text_train, args.gpu)
     embedding_val = model.compute_embedding(text_val, args.gpu)
-    emb_val_batches, label_val_batches = get_batches(embedding_val, labels_val, args.batch_size, args.gpu)
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
@@ -154,7 +148,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size, args.gpu)
+        emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch}")
@@ -230,8 +224,8 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
     model_paths.sort()
     model_path = model_paths[-1]
-    print("loading model:", model_path)
-    test_dir = "./experiments/test_results/"
+    print("\nStarting evaluation, loading model:", model_path)
+    # test_dir = "./experiments/test_results/"
 
     model = ProtopNetNLP(args)
     checkpoint = torch.load(model_path)
@@ -277,20 +271,21 @@ def test(args, text_train, labels_train, text_test, labels_test):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         labels_train = labels_train.cpu().numpy()
-        visualize_protos(embedding, labels_train, prototypes, n_components=2, save_path=os.path.dirname(save_path))
-        visualize_protos(embedding, labels_train, prototypes, n_components=3, save_path=os.path.dirname(save_path))
+        visualize_protos(embedding, labels_train, prototypes, n_components=2, type=args.trans_type, save_path=os.path.dirname(save_path))
+        visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
-def visualize_protos(embedding, labels, prototypes, n_components, save_path):
+def visualize_protos(embedding, labels, prototypes, n_components, type, save_path):
         # visualize prototypes
-        pca = PCA(n_components=n_components)
-        pca.fit(embedding)
-        print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
-        embed_trans = pca.transform(embedding)
-        proto_trans = pca.transform(prototypes)
-
-        # alternatively apply TSNE (non-linear transformation)
-        # X_trans = TSNE(n_components=2).fit_transform(X)
+        if type == 'PCA':
+            pca = PCA(n_components=n_components)
+            pca.fit(embedding)
+            print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
+            embed_trans = pca.transform(embedding)
+            proto_trans = pca.transform(prototypes)
+        elif type == 'TSNE':
+            tsne = TSNE(n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
+            [embed_trans, proto_trans] = np.split(tsne, len(embedding))
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
         rnd_labels = labels[rnd_samples]
@@ -308,7 +303,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, save_path):
         fig.savefig(os.path.join(save_path, 'proto_vis'+str(n_components)+'d.png'))
 
 def nearest_neighbors(text_embedded, prototypes):
-    distances = torch.cdist(text_embedded, prototypes, p=2) # shape, num_samples x num_prototypes
+    distances = torch.cdist(text_embedded, prototypes, p=2) # shape: num_samples x num_prototypes
     nearest_ids = torch.argmin(distances, dim=0)
     return nearest_ids.cpu().numpy()
 
@@ -325,12 +320,15 @@ if __name__ == '__main__':
     labels = torch.LongTensor(labels).cuda(args.gpu)
     text_train, labels_train, text_val, labels_val, text_test, labels_test = split_data(text, labels)
 
-    if args.one_shot == True:
+    if args.one_shot:
         idx = random.sample(range(len(text_train)),100)
         text_train = list(text_train[i] for i in idx)
-        labels_train = [labels_train[i] for i in idx]
+        labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 
-    if args.mode == 'train':
+    if args.mode == 'normal':
+        train(args, text_train, labels_train, text_val, labels_val)
+        test(args, text_train, labels_train, text_test, labels_test)
+    elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
     elif args.mode == 'test':
         test(args, text_train, labels_train, text_test, labels_test)
