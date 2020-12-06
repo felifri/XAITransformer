@@ -185,32 +185,20 @@ def train(args, text_train, labels_train, text_val, labels_val):
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
-            losses_per_batch_val = []
-            all_labels_val = []
-            all_preds_val = []
             with torch.no_grad():
-                for j, (emb_val_batch, label_val_batch) in enumerate(zip(emb_val_batches, label_val_batches)):
+                outputs = model.forward(embedding_val)
+                prototype_distances, feature_vector_distances, predicted_label = outputs
 
-                    outputs = model.forward(emb_val_batch)
-                    prototype_distances, feature_vector_distances, predicted_label = outputs
+                # compute individual losses and backward step
+                ce_loss = ce_crit(predicted_label, labels_val)
+                r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
+                loss = ce_loss + \
+                       args.lambda2 * r1_loss + \
+                       args.lambda3 * r2_loss
 
-                    # compute individual losses and backward step
-                    ce_loss = ce_crit(predicted_label, label_val_batch)
-                    r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
-                    loss = ce_loss + \
-                           args.lambda2 * r1_loss + \
-                           args.lambda3 * r2_loss
-
-                    _, predicted = torch.max(predicted_label.data, 1)
-                    all_preds_val += predicted.cpu().numpy().tolist()
-                    all_labels_val += label_val_batch.cpu().numpy().tolist()
-
-                    # store losses
-                    losses_per_batch_val.append(float(loss))
-
-            mean_loss_val = np.mean(losses_per_batch_val)
-            acc_val = accuracy_score(all_labels_val, all_preds_val)
-            print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(mean_loss_val, 100 * acc_val))
+                _, predicted_val = torch.max(predicted_label.data, 1)
+                acc_val = accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
+                print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss, 100 * acc_val))
 
             save_checkpoint(save_dir, {
                 'epoch': epoch + 1,
