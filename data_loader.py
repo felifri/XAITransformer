@@ -6,7 +6,7 @@ import pickle
 ###### load toxicity data ##########################
 ####################################################
 
-def parse_prompts_and_continuation(tag, discrete=True):
+def parse_prompts_and_continuation(tag, discrete=True, discard=False):
     dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
@@ -21,6 +21,10 @@ def parse_prompts_and_continuation(tag, discrete=True):
 
     x = x_continuation + x_prompts
     y = y_continuation + y_prompts
+
+    if discard:
+        y = list([e for e in y if (e<0.2 or e>0.8)])
+        x = list([a for a,e in zip(x,y) if (e<0.2 or e>0.8)])
 
     if discrete:
         y = list([0 if e < 0.5 else 1 for e in y])
@@ -54,9 +58,9 @@ def parse_full(tag, discrete=True):
     return x, y
 
 # get toxicity data, x is text as list of strings, y is list of ints (0,1)
-def parse_all(tag):
+def parse_all(tag, args):
     x, y = [], []
-    x_, y_ = parse_prompts_and_continuation(tag)
+    x_, y_ = parse_prompts_and_continuation(tag, discard=args.discard)
     x += x_
     y += y_
     x_, y_ = parse_full(tag)
@@ -104,7 +108,7 @@ def load_data(args):
     tag = args.data_name
     texts, labels = [], []
     if tag=='toxicity':
-        texts, labels = parse_all(tag)
+        texts, labels = parse_all(tag, args)
     elif tag=='reviews':
         texts, labels = get_reviews(args)
     return texts, labels

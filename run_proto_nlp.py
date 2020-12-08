@@ -1,10 +1,3 @@
-"""
-Script for training a protopnet. (Li et al. 2018)
-https://www.aaai.org/ocs/index.php/AAAI/AAAI18/paper/viewFile/17082/16552
-
-CUDA_VISIBLE_DEVICES=0 python main_attention.py --mode train --data standard --batch_size 128 --lr 0.0001 --num_epochs 2 --n_splits 5 --split 0 --fp_data /home/ml-wstammer/WS/datasets/plantpheno_berry/t4/whiteref_norm/mean/parsed/ --perc_pxl_per_sample 10
-"""
-
 import numpy as np
 import os
 import torch
@@ -65,6 +58,8 @@ parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE'],
                     help='Which transformation should be used to visualize the prototypes')
+parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
+                                                                'toxic (1) and not toxic at all (0) shall be omitted')
 
 
 def get_batches(embedding, labels, batch_size=128):
@@ -170,7 +165,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
             all_preds += predicted.cpu().numpy().tolist()
             all_labels += label_batch.cpu().numpy().tolist()
 
-            loss.backward(retain_graph=True)
+            loss.backward()
             # nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
             # store losses
@@ -178,6 +173,19 @@ def train(args, text_train, labels_train, text_val, labels_val):
             ce_loss_per_batch.append(float(ce_loss))
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
+
+        mean_loss = np.mean(losses_per_batch)
+        ce_mean_loss = np.mean(ce_loss_per_batch)
+        r1_mean_loss = np.mean(r1_loss_per_batch)
+        r2_mean_loss = np.mean(r2_loss_per_batch)
+        acc = accuracy_score(all_labels, all_preds)
+        print("Epoch {}, mean loss {:.4f}, ce loss {:.4f}, r1 loss {:.4f}, "
+              "r2 loss {:.4f}, train acc {:.4f}".format(epoch+1,
+                                                        mean_loss,
+                                                        ce_mean_loss,
+                                                        r1_mean_loss,
+                                                        r2_mean_loss,
+                                                        100 * acc))
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
@@ -205,18 +213,6 @@ def train(args, text_train, labels_train, text_val, labels_val):
             }, time_stmp, best=acc_val >= best_acc)
             if acc_val >= best_acc:
                 best_acc = acc_val
-
-        mean_loss = np.mean(losses_per_batch)
-        ce_mean_loss = np.mean(ce_loss_per_batch)
-        r1_mean_loss = np.mean(r1_loss_per_batch)
-        r2_mean_loss = np.mean(r2_loss_per_batch)
-        acc = accuracy_score(all_labels, all_preds)
-        print("Epoch {}, mean loss {:.4f}, ce loss {:.4f}, r1 loss {:.4f}, r2 loss {:.4f}, train acc {:.4f}".format(epoch+1,
-                                                                                                                    mean_loss,
-                                                                                                                    ce_mean_loss,
-                                                                                                                    r1_mean_loss,
-                                                                                                                    r2_mean_loss,
-                                                                                                                    100 * acc))
 
 
 def test(args, text_train, labels_train, text_test, labels_test):
@@ -272,7 +268,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
         prototypes = prototypes.cpu().numpy()
         labels_train = labels_train.cpu().numpy()
         visualize_protos(embedding, labels_train, prototypes, n_components=2, type=args.trans_type, save_path=os.path.dirname(save_path))
-        visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
+        # visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
 def visualize_protos(embedding, labels, prototypes, n_components, type, save_path):
