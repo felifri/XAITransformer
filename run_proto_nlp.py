@@ -1,16 +1,18 @@
-import numpy as np
-import os
-import torch
 import argparse
-from tqdm import tqdm
-from sklearn.metrics import accuracy_score
-import matplotlib.pyplot as plt
-import random
 import datetime
 import glob
+import os
+import random
 import sys
-from sklearn.manifold import TSNE
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from sklearn.metrics import balanced_accuracy_score
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 try:
     from rtpt.rtpt import RTPT
@@ -18,7 +20,7 @@ except:
     sys.path.append('../rtpt')
     from rtpt import RTPT
 
-from models import ProtopNetNLP
+from models import ProtoNetNLP
 import data_loader
 
 # Create RTPT object
@@ -61,7 +63,6 @@ parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TS
 parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
                                                                 'toxic (1) and not toxic at all (0) shall be omitted')
 
-
 def get_batches(embedding, labels, batch_size=128):
     def divide_chunks(l, n):
         for i in range(0, len(l), n):
@@ -98,35 +99,14 @@ def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.t
         os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
         torch.save(state, save_path_checkpoint)
 
-def split_data(text, labels):
-    split = [0.7,0.1,0.2]
-    idx = [round(elem*len(text)) for elem in split]
-    idx = np.cumsum(idx)
-    tmp = list(zip(text, labels))
-    random.shuffle(tmp)
-    text, labels = zip(*tmp)
-    labels = torch.stack(labels)
-    text_train = text[:idx[0]]
-    labels_train = labels[:idx[0]]
-    text_val = text[idx[0]:idx[1]]
-    labels_val = labels[idx[0]:idx[1]]
-    text_test = text[idx[1]:idx[2]]
-    labels_test = labels[idx[1]:idx[2]]
-    return text_train, labels_train, text_val, labels_val, text_test, labels_test
-
-
 def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    model = ProtopNetNLP(args)
-
-    num_params = sum(p.numel() for p in model.parameters())
-    print("Number of parameters {}".format(num_params))
+    model = ProtoNetNLP(args)
     print("Running on gpu {}".format(args.gpu))
     model.cuda(args.gpu)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
 
@@ -146,7 +126,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size)
 
         # Update the RTPT
-        rtpt.step(subtitle=f"epoch={epoch}")
+        rtpt.step(subtitle=f"epoch={epoch+1}")
 
         for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
             optimizer.zero_grad()
@@ -166,7 +146,6 @@ def train(args, text_train, labels_train, text_val, labels_val):
             all_labels += label_batch.cpu().numpy().tolist()
 
             loss.backward()
-            # nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
             # store losses
             losses_per_batch.append(float(loss))
@@ -178,7 +157,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         ce_mean_loss = np.mean(ce_loss_per_batch)
         r1_mean_loss = np.mean(r1_loss_per_batch)
         r2_mean_loss = np.mean(r2_loss_per_batch)
-        acc = accuracy_score(all_labels, all_preds)
+        acc = balanced_accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss {:.4f}, ce loss {:.4f}, r1 loss {:.4f}, "
               "r2 loss {:.4f}, train acc {:.4f}".format(epoch+1,
                                                         mean_loss,
@@ -201,7 +180,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
                        args.lambda3 * r2_loss
 
                 _, predicted_val = torch.max(predicted_label.data, 1)
-                acc_val = accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
+                acc_val = balanced_accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
                 print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss, 100 * acc_val))
 
             save_checkpoint(save_dir, {
@@ -223,11 +202,10 @@ def test(args, text_train, labels_train, text_test, labels_test):
     print("\nStarting evaluation, loading model:", model_path)
     # test_dir = "./experiments/test_results/"
 
-    model = ProtopNetNLP(args)
+    model = ProtoNetNLP(args)
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
     model.cuda(args.gpu)
-    print(model.get_proto_weights())
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
     interp_criteria = ProtoLoss()
@@ -247,7 +225,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
                args.lambda3 * r2_loss
 
         _, predicted = torch.max(predicted_label.data, 1)
-        acc_test = accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
+        acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
         print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
         # get prototypes
@@ -256,10 +234,14 @@ def test(args, text_train, labels_train, text_test, labels_test):
         nearest_ids = nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
+        weights = model.get_proto_weights()
         save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
         #os.makedirs(os.path.dirname(save_path), exist_ok=True)
         txt_file = open(save_path, "w+")
         for line in proto_texts:
+            txt_file.write(str(line))
+            txt_file.write("\n")
+        for line in weights:
             txt_file.write(str(line))
             txt_file.write("\n")
         txt_file.close()
@@ -267,19 +249,19 @@ def test(args, text_train, labels_train, text_test, labels_test):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         labels_train = labels_train.cpu().numpy()
-        visualize_protos(embedding, labels_train, prototypes, n_components=2, type=args.trans_type, save_path=os.path.dirname(save_path))
+        visualize_protos(embedding, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
         # visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
-def visualize_protos(embedding, labels, prototypes, n_components, type, save_path):
+def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
         # visualize prototypes
-        if type == 'PCA':
+        if trans_type == 'PCA':
             pca = PCA(n_components=n_components)
             pca.fit(embedding)
             print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
             embed_trans = pca.transform(embedding)
             proto_trans = pca.transform(prototypes)
-        elif type == 'TSNE':
+        elif trans_type == 'TSNE':
             tsne = TSNE(n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
             [embed_trans, proto_trans] = np.split(tsne, len(embedding))
 
@@ -313,8 +295,16 @@ if __name__ == '__main__':
         torch.cuda.set_device(args.gpu)
 
     text, labels = data_loader.load_data(args)
-    labels = torch.LongTensor(labels).cuda(args.gpu)
-    text_train, labels_train, text_val, labels_val, text_test, labels_test = split_data(text, labels)
+    # split data, and split test set again to get validation and test set
+    text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, stratify=labels)
+    text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
+                                                                         stratify=labels_test)
+    labels_train = torch.LongTensor(labels_train).cuda(args.gpu)
+    labels_val = torch.LongTensor(labels_val).cuda(args.gpu)
+    labels_test = torch.LongTensor(labels_test).cuda(args.gpu)
+    # set class weights for balanced cross entropy computation
+    balance = labels.count(0) / len(labels)
+    args.class_weights = [1-balance, balance]
 
     if args.one_shot:
         idx = random.sample(range(len(text_train)),100)

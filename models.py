@@ -3,25 +3,22 @@ import torch.nn as nn
 from sentence_transformers import SentenceTransformer
 
 
-
-class ProtopNetNLP(nn.Module):
+class ProtoNetNLP(nn.Module):
     def __init__(self, args):
-        super(ProtopNetNLP, self).__init__()
+        super(ProtoNetNLP, self).__init__()
 
-        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens')
+        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu)
         enc_size = self.sentBert.get_sentence_embedding_dimension()
         for param in self.sentBert.parameters():
             param.requires_grad = False
         # tensor of prototype feature vectors
-        self.protolayer = nn.Parameter(torch.nn.init.uniform_(torch.empty((args.num_prototypes, enc_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, enc_size))),
                                                              requires_grad=True)
         #self.protolayer = self.protolayer.repeat(hyperparams['num_prototypes'], 1)
-        #self.protolayer.to(device)
         #self.pdist = nn.PairwiseDistance(p=2)
 
-        self.fc = torch.nn.Sequential(
-            torch.nn.Linear(args.num_prototypes, args.num_classes),
-            # torch.nn.Softmax(dim=1)
+        self.fc = nn.Sequential(
+            nn.Linear(args.num_prototypes, args.num_classes),
         )
 
     def forward(self, embedding):
@@ -34,7 +31,7 @@ class ProtopNetNLP(nn.Module):
 
         #prototypes = self.ae.decoder(self.protolayers.unsqueeze(dim=1))
 
-        return (prototype_distances, feature_vector_distances, class_out)
+        return prototype_distances, feature_vector_distances, class_out
 
     def get_protos(self):
         return self.protolayer
@@ -43,6 +40,31 @@ class ProtopNetNLP(nn.Module):
         return list(self.fc.children())[-1].weight.T.cpu().detach().numpy()
 
     def compute_embedding(self, x, gpu):
-        embedding = self.sentBert.encode(x, convert_to_tensor=True)
+        embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
+        embedding = embedding.cuda(gpu)
+        return embedding
+
+
+class BaseNet(nn.Module):
+    def __init__(self, args):
+        super(BaseNet, self).__init__()
+
+        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu)
+        enc_size = self.sentBert.get_sentence_embedding_dimension()
+        for param in self.sentBert.parameters():
+            param.requires_grad = False
+
+        self.fc = nn.Sequential(
+            nn.Linear(enc_size, 20),
+            nn.Dropout(),
+            nn.ReLU(),
+            nn.Linear(20, args.num_classes),
+        )
+
+    def forward(self, embedding):
+        return self.fc(embedding)
+
+    def compute_embedding(self, x, gpu):
+        embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
         embedding = embedding.cuda(gpu)
         return embedding
