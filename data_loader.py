@@ -23,8 +23,8 @@ def parse_prompts_and_continuation(tag, discrete=True, discard=False):
     y = y_continuation + y_prompts
 
     if discard:
-        y = list([e for e in y if (e<0.2 or e>0.8)])
-        x = list([a for a,e in zip(x,y) if (e<0.2 or e>0.8)])
+        x = list([a for a, e in zip(x, y) if (e < 0.3 or e > 0.7)])
+        y = list([e for e in y if (e < 0.3 or e > 0.7)])
 
     if discrete:
         y = list([0 if e < 0.5 else 1 for e in y])
@@ -32,7 +32,7 @@ def parse_prompts_and_continuation(tag, discrete=True, discard=False):
     return x, y
 
 
-def parse_full(tag, discrete=True):
+def parse_full(tag, discrete=True, discard=False):
     dataset_file = "./data/realtoxicityprompts/full data.jsonl"
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
@@ -52,6 +52,11 @@ def parse_full(tag, discrete=True):
     y = [e for i, e in enumerate(y) if i not in idx]
 
     assert len(x) == len(y)
+
+    if discard:
+        x = list([a for a, e in zip(x, y) if (e < 0.3 or e > 0.7)])
+        y = list([e for e in y if (e < 0.3 or e > 0.7)])
+
     if discrete:
         y = [0 if e < 0.5 else 1 for e in y]
 
@@ -63,7 +68,7 @@ def parse_all(tag, args):
     x_, y_ = parse_prompts_and_continuation(tag, discard=args.discard)
     x += x_
     y += y_
-    x_, y_ = parse_full(tag)
+    x_, y_ = parse_full(tag, discard=args.discard)
     x += x_
     y += y_
     return x, y
@@ -101,7 +106,7 @@ def convert_label(labels):
 
 
 ####################################################
-###### main loading file ###########################
+###### main loading function #######################
 ####################################################
 
 def load_data(args):
