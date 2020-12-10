@@ -1,6 +1,4 @@
 import argparse
-import datetime
-import glob
 import os
 import random
 import sys
@@ -26,8 +24,6 @@ rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_ite
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('-m', '--mode', default="normal", type=str,
-                    help='What do you want to do? Select either normal, train, test,')
 parser.add_argument('--lr', type=float, default=0.01,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
@@ -42,12 +38,6 @@ parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
 parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
                     help='Select data name')
-parser.add_argument('--num_prototypes', default=10, type = int,
-                    help='Total number of prototypes')
-parser.add_argument('-l2','--lambda2', default=0.1, type=float,
-                    help='Weight for prototype loss computation')
-parser.add_argument('-l3','--lambda3', default=0.1, type=float,
-                    help='Weight for prototype loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
@@ -55,8 +45,6 @@ parser.add_argument('--class_weights', default=[0.5,0.5],
 parser.add_argument('-g','--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
-parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE'],
-                    help='Which transformation should be used to visualize the prototypes')
 parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
                                                                 'toxic (1) and not toxic at all (0) shall be omitted')
 
@@ -78,9 +66,7 @@ def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.t
         torch.save(state, save_path_checkpoint)
 
 
-def train(args, text_train, labels_train, text_val, labels_val):
-    save_dir = "./experiments/train_results/"
-    time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
 
     model = BaseNet(args)
     print("Running on gpu {}".format(args.gpu))
@@ -139,46 +125,21 @@ def train(args, text_train, labels_train, text_val, labels_val):
                 _, predicted_val = torch.max(predicted_label.data, 1)
                 acc_val = balanced_accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
                 print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss, 100 * acc_val))
+                if acc_val >= best_acc:
+                    best_acc = acc_val
+                    best_model = model.state_dict()
 
-            save_checkpoint(save_dir, {
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'hyper_params': args,
-                'acc_val': acc_val,
-            }, time_stmp, best=acc_val >= best_acc)
-            if acc_val >= best_acc:
-                best_acc = acc_val
-
-
-def test(args, text_test, labels_test):
-    load_path = "./experiments/train_results/*"
-    model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-    model_paths.sort()
-    model_path = model_paths[-1]
-    print("\nStarting evaluation, loading model:", model_path)
-    # test_dir = "./experiments/test_results/"
-
-    model = BaseNet(args)
-    checkpoint = torch.load(model_path)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.cuda(args.gpu)
-    model.eval()
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
-
-    embedding_test = model.compute_embedding(text_test, args.gpu)
-
-    with torch.no_grad():
-        outputs = model.forward(embedding_test)
-        predicted_label = outputs
-
-        # compute individual losses and backward step
-        loss = ce_crit(predicted_label, labels_test)
-
-        _, predicted = torch.max(predicted_label.data, 1)
-        acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
-        print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
-
+            model.load_state_dict(best_model)
+            model.cuda(args.gpu)
+            model.eval()
+            embedding_test = model.compute_embedding(text_test, args.gpu)
+            with torch.no_grad():
+                outputs = model.forward(embedding_test)
+                predicted_label = outputs
+                _, predicted = torch.max(predicted_label.data, 1)
+                acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
+                loss = ce_crit(predicted_label, labels_test)
+                print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
 if __name__ == '__main__':
     torch.manual_seed(0)
@@ -205,10 +166,4 @@ if __name__ == '__main__':
         text_train = list(text_train[i] for i in idx)
         labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 
-    if args.mode == 'normal':
-        train(args, text_train, labels_train, text_val, labels_val)
-        test(args, text_test, labels_test)
-    elif args.mode == 'train':
-        train(args, text_train, labels_train, text_val, labels_val)
-    elif args.mode == 'test':
-        test(args, text_test, labels_test)
+    train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test)
