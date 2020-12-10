@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from MulticoreTSNE import MulticoreTSNE as TSNE
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
@@ -262,8 +262,8 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
             embed_trans = pca.transform(embedding)
             proto_trans = pca.transform(prototypes)
         elif trans_type == 'TSNE':
-            tsne = TSNE(n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
-            [embed_trans, proto_trans] = np.split(tsne, len(embedding))
+            tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
+            [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
         rnd_labels = labels[rnd_samples]
@@ -278,7 +278,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
             ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
             ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
         ax.legend()
-        fig.savefig(os.path.join(save_path, 'proto_vis'+str(n_components)+'d.png'))
+        fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
 
 def nearest_neighbors(text_embedded, prototypes):
     distances = torch.cdist(text_embedded, prototypes, p=2) # shape: num_samples x num_prototypes

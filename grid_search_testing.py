@@ -89,7 +89,7 @@ class ProtoLoss:
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
         return r1_loss, r2_loss
 
-def train(args, text_train, labels_train, text_val, labels_val):
+def search(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
     global acc, mean_loss
     parameters = dict(
         lr=[0.01, 0.001],
@@ -121,6 +121,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         num_epochs = args.num_epochs
         print("\nStarting training for {} epochs\n".format(num_epochs))
         best_acc = 0
+        best_model = []
         for epoch in tqdm(range(num_epochs)):
             all_preds = []
             all_labels = []
@@ -192,9 +193,21 @@ def train(args, text_train, labels_train, text_val, labels_val):
                     tb.add_scalar("Accuracy_val", acc_val, epoch+1)
                 if acc_val >= best_acc:
                     best_acc = acc_val
+                    best_model = model.state_dict()
+
+        model.load_state_dict(best_model)
+        model.cuda(args.gpu)
+        model.eval()
+        embedding_test = model.compute_embedding(text_test, args.gpu)
+        with torch.no_grad():
+            outputs = model.forward(embedding_test)
+            _, _, predicted_label = outputs
+
+            _, predicted = torch.max(predicted_label.data, 1)
+            acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
 
         tb.add_hparams({"lr": lr, "bsize": batch_size, "lambda2": lambda2, "lambda3": lambda3},
-                        dict(best_accuracy=best_acc))
+                        dict(best_accuracy=best_acc, test_accuarcy=acc_test))
 
     tb.close()
 
@@ -224,4 +237,4 @@ if __name__ == '__main__':
         text_train = list(text_train[i] for i in idx)
         labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 
-    train(args, text_train, labels_train, text_val, labels_val)
+    search(args, text_train, labels_train, text_val, labels_val, text_test, labels_test)
