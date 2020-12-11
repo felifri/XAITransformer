@@ -1,16 +1,13 @@
 import argparse
 import datetime
 import glob
+import sys
 import os
 import random
-import sys
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
+import numpy as np
 from sklearn.metrics import balanced_accuracy_score
-from sklearn.decomposition import PCA
-from MulticoreTSNE import MulticoreTSNE as TSNE
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
@@ -21,7 +18,7 @@ except:
     from rtpt import RTPT
 
 from models import ProtoNetNLP
-import data_loader
+import utils
 
 # Create RTPT object
 rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
@@ -31,13 +28,13 @@ rtpt.start()
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="normal", type=str,
                     help='What do you want to do? Select either normal, train, test,')
-parser.add_argument('--lr', type=float, default=0.01,
+parser.add_argument('--lr', type=float, default=0.001,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
                     help='Whether to use cpu')
 parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=128, type=int,
+parser.add_argument('-bs', '--batch_size', default=256, type=int,
                     help='Batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
@@ -63,42 +60,6 @@ parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TS
 parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
                                                                 'toxic (1) and not toxic at all (0) shall be omitted')
 
-def get_batches(embedding, labels, batch_size=128):
-    def divide_chunks(l, n):
-        for i in range(0, len(l), n):
-            yield l[i:i + n]
-    tmp = list(zip(embedding, labels))
-    random.shuffle(tmp)
-    embedding, labels = zip(*tmp)
-    embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
-    label_batches = list(divide_chunks(torch.stack(labels), batch_size))
-    return embedding_batches, label_batches
-
-class ProtoLoss:
-    def __init__(self):
-        pass
-
-    def __call__(self, feature_vector_distances, prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-
-        :param feature_vector_distances: tensor of size [n_prototypes, n_batches], distance between the data encodings
-                                          of the autoencoder and the prototypes
-        :param prototype_distances: tensor of size [n_batches, n_prototypes], distance between the prototypes and
-                                    data encodings of the autoencoder
-        :return:
-        """
-        #assert prototype_distances.shape == feature_vector_distances.T.shape
-        r1_loss = torch.mean(torch.min(feature_vector_distances, dim=1)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-        return r1_loss, r2_loss
-
-def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
-    if best:
-        save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
-        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-        torch.save(state, save_path_checkpoint)
-
 def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -108,7 +69,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
     model.cuda(args.gpu)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
-    interp_criteria = ProtoLoss()
+    interp_criteria = utils.ProtoLoss()
 
     model.train()
     embedding = model.compute_embedding(text_train, args.gpu)
@@ -123,7 +84,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
-        emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size)
+        emb_batches, label_batches = utils.get_batches(embedding, labels_train, args.batch_size)
 
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch+1}")
@@ -183,7 +144,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
                 acc_val = balanced_accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
                 print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss, 100 * acc_val))
 
-            save_checkpoint(save_dir, {
+            utils.save_checkpoint(save_dir, {
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -208,7 +169,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model.cuda(args.gpu)
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
-    interp_criteria = ProtoLoss()
+    interp_criteria = utils.ProtoLoss()
 
     embedding = model.compute_embedding(text_train, args.gpu)
     embedding_test = model.compute_embedding(text_test, args.gpu)
@@ -231,7 +192,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
         # get prototypes
         prototypes = model.get_protos()
         # "convert" prototype embedding to text (take text of nearest training sample)
-        nearest_ids = nearest_neighbors(embedding, prototypes)
+        nearest_ids = utils.nearest_neighbors(embedding, prototypes)
         proto_texts = [[index, text[index]] for index in nearest_ids]
 
         weights = model.get_proto_weights()
@@ -249,41 +210,8 @@ def test(args, text_train, labels_train, text_test, labels_test):
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         labels_train = labels_train.cpu().numpy()
-        visualize_protos(embedding, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+        utils.visualize_protos(embedding, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
         # visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
-
-
-def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
-        # visualize prototypes
-        if trans_type == 'PCA':
-            pca = PCA(n_components=n_components)
-            pca.fit(embedding)
-            print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
-            embed_trans = pca.transform(embedding)
-            proto_trans = pca.transform(prototypes)
-        elif trans_type == 'TSNE':
-            tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
-            [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
-
-        rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
-        rnd_labels = labels[rnd_samples]
-        rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
-        fig = plt.figure()
-        if n_components==2:
-            ax = fig.add_subplot(111)
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c=rnd_labels,marker='x', label='data')
-            ax.scatter(proto_trans[:,0],proto_trans[:,1],c='blue',marker='o',label='prototypes')
-        elif n_components==3:
-            ax = fig.add_subplot(111, projection='3d')
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
-            ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
-        ax.legend()
-        fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
-
-def nearest_neighbors(text_embedded, prototypes):
-    distances = torch.cdist(text_embedded, prototypes, p=2) # shape: num_samples x num_prototypes
-    nearest_ids = torch.argmin(distances, dim=0)
-    return nearest_ids.cpu().numpy()
 
 
 if __name__ == '__main__':
@@ -294,7 +222,7 @@ if __name__ == '__main__':
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
 
-    text, labels = data_loader.load_data(args)
+    text, labels = utils.load_data(args)
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, stratify=labels)
     text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
@@ -307,7 +235,7 @@ if __name__ == '__main__':
     args.class_weights = [1-balance, balance]
 
     if args.one_shot:
-        idx = random.sample(range(len(text_train)),100)
+        idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
         labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 

@@ -1,6 +1,81 @@
 import os
+import random
+import torch
+from sklearn.decomposition import PCA
+from MulticoreTSNE import MulticoreTSNE as TSNE
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pickle
+
+
+def get_batches(embedding, labels, batch_size=128):
+    def divide_chunks(l, n):
+        for i in range(0, len(l), n):
+            yield l[i:i + n]
+    tmp = list(zip(embedding, labels))
+    random.shuffle(tmp)
+    embedding, labels = zip(*tmp)
+    embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
+    label_batches = list(divide_chunks(torch.stack(labels), batch_size))
+    return embedding_batches, label_batches
+
+class ProtoLoss:
+    def __init__(self):
+        pass
+
+    def __call__(self, feature_vector_distances, prototype_distances):
+        """
+        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
+
+        :param feature_vector_distances: tensor of size [n_prototypes, n_batches], distance between the data encodings
+                                          of the autoencoder and the prototypes
+        :param prototype_distances: tensor of size [n_batches, n_prototypes], distance between the prototypes and
+                                    data encodings of the autoencoder
+        :return:
+        """
+        #assert prototype_distances.shape == feature_vector_distances.T.shape
+        r1_loss = torch.mean(torch.min(feature_vector_distances, dim=1)[0])
+        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
+        return r1_loss, r2_loss
+
+def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
+    if best:
+        save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
+        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
+        torch.save(state, save_path_checkpoint)
+
+def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
+        # visualize prototypes
+        if trans_type == 'PCA':
+            pca = PCA(n_components=n_components)
+            pca.fit(embedding)
+            print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
+            embed_trans = pca.transform(embedding)
+            proto_trans = pca.transform(prototypes)
+        elif trans_type == 'TSNE':
+            tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
+            [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
+
+        rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
+        rnd_labels = labels[rnd_samples]
+        rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
+        fig = plt.figure()
+        if n_components==2:
+            ax = fig.add_subplot(111)
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c=rnd_labels,marker='x', label='data')
+            ax.scatter(proto_trans[:,0],proto_trans[:,1],c='blue',marker='o',label='prototypes')
+        elif n_components==3:
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
+            ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
+        ax.legend()
+        fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
+
+def nearest_neighbors(text_embedded, prototypes):
+    distances = torch.cdist(text_embedded, prototypes, p=2) # shape: num_samples x num_prototypes
+    nearest_ids = torch.argmin(distances, dim=0)
+    return nearest_ids.cpu().numpy()
 
 ####################################################
 ###### load toxicity data ##########################

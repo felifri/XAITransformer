@@ -1,10 +1,10 @@
 import argparse
+import sys
 import os
 import random
-import sys
 
-import numpy as np
 import torch
+import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -16,7 +16,7 @@ except:
     from rtpt import RTPT
 
 from models import BaseNet
-import data_loader
+import utils
 
 # Create RTPT object
 rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
@@ -24,13 +24,13 @@ rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_ite
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('--lr', type=float, default=0.01,
+parser.add_argument('--lr', type=float, default=0.001,
                     help='Learning rate')
 parser.add_argument('--cpu', action='store_true', default=False,
                     help='Whether to use cpu')
 parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=128, type=int,
+parser.add_argument('-bs', '--batch_size', default=256, type=int,
                     help='Batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
@@ -149,7 +149,7 @@ if __name__ == '__main__':
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
 
-    text, labels = data_loader.load_data(args)
+    text, labels = utils.load_data(args)
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, stratify=labels)
     text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
