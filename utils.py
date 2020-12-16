@@ -72,11 +72,6 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
         ax.legend()
         fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
 
-def nearest_neighbors(text_embedded, prototypes):
-    distances = torch.cdist(text_embedded, prototypes, p=2) # shape: num_samples x num_prototypes
-    nearest_ids = torch.argmin(distances, dim=0)
-    return nearest_ids.cpu().numpy()
-
 ####################################################
 ###### load toxicity data ##########################
 ####################################################

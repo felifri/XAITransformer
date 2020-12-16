@@ -17,7 +17,7 @@ except:
     sys.path.append('../rtpt')
     from rtpt import RTPT
 
-from models import ProtoNet
+from models import ProtoPNet
 import utils
 
 # Create RTPT object
@@ -66,7 +66,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    model = ProtoNet(args)
+    model = ProtoPNet(args)
     print("Running on gpu {}".format(args.gpu))
     model.cuda(args.gpu)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -165,7 +165,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
     print("\nStarting evaluation, loading model:", model_path)
     # test_dir = "./experiments/test_results/"
 
-    model = ProtoNet(args)
+    model = ProtoPNet(args)
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
     model.cuda(args.gpu)
@@ -243,6 +243,7 @@ if __name__ == '__main__':
 
     if args.mode == 'normal':
         train(args, text_train, labels_train, text_val, labels_val)
+        torch.cuda.empty_cache()
         test(args, text_train, labels_train, text_test, labels_test)
     elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
