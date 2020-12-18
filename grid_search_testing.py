@@ -16,7 +16,7 @@ except:
     sys.path.append('../rtpt')
     from rtpt import RTPT
 
-from models import ProtoNetNLP
+from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 import utils
 
 # Create RTPT object
@@ -25,13 +25,11 @@ rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_ite
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('--lr', type=float, default=[0.01,0.001],
+parser.add_argument('--lr', type=str, default=[0.01,0.001],
                     help='Learning rate')
-parser.add_argument('--cpu', action='store_true', default=False,
-                    help='Whether to use cpu')
-parser.add_argument('-e', '--num_epochs', default=[100], type=int,
+parser.add_argument('-e', '--num_epochs', default=[100], type=str,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=[256], type=int,
+parser.add_argument('-bs', '--batch_size', default=[256], type=str,
                     help='Batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
@@ -39,11 +37,11 @@ parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
 parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
                     help='Select data name')
-parser.add_argument('--num_prototypes', default=[2,4,10], type = int,
+parser.add_argument('--num_prototypes', default=[2,4,10], type = str,
                     help='Total number of prototypes')
-parser.add_argument('-l2','--lambda2', default=[0.1,0.4,0.9], type=float,
+parser.add_argument('-l1','--lambda1', default=[0.1,0.4,0.9], type=str,
                     help='Weight for prototype loss computation')
-parser.add_argument('-l3','--lambda3', default=[0.1,0.4,0.9], type=float,
+parser.add_argument('-l2','--lambda2', default=[0.1,0.4,0.9], type=str,
                     help='Weight for prototype loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -54,18 +52,20 @@ parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
                                                                 'toxic (1) and not toxic at all (0) shall be omitted')
-parser.add_argument('--model', type=str, default='Proto', choices=['Proto','Baseline'],
+parser.add_argument('--proto_size', type=int, default=4,
+                    help='Define how many words should be used to define a prototype')
+parser.add_argument('--model', type=str, default='dist', choices=['p_conv','p_dist','dist'],
                     help='Define which model to use')
 
 def search(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
     global acc, mean_loss
     parameters = dict(
-        num_prototypes = args.num_prototypes,
-        lr = args.lr,
-        num_epochs = args.num_epochs,
-        batch_size = args.batch_size,
-        lambda2 = args.lambda2,
-        lambda3 = args.lambda3
+        num_prototypes = list(map(int, args.num_prototypes)),
+        lr = list(map(float, args.lr)),
+        num_epochs = list(map(int, args.num_epochs)),
+        batch_size = list(map(int, args.batch_size)),
+        lambda1 = list(map(float, args.lambda1)),
+        lambda2 = list(map(float, args.lambda2))
     )
 
     param_values = [v for v in parameters.values()]
@@ -73,15 +73,21 @@ def search(args, text_train, labels_train, text_val, labels_val, text_test, labe
 
     print("Running on gpu {}".format(args.gpu))
 
-    for run_id, (num_prototypes, lr, num_epochs, batch_size, lambda2, lambda3) in enumerate(product(*param_values)):
+    for run_id, (num_prototypes, lr, num_epochs, batch_size, lambda1, lambda2) in enumerate(product(*param_values)):
         comment = f' num_prototypes = {num_prototypes} batch_size = {batch_size} lr = {lr} ' \
-                  f'lambda2 = {lambda2} lambda3 ={lambda3} num_epochs = {num_epochs}'
+                  f'lambda1 = {lambda1} lambda2 ={lambda2} num_epochs = {num_epochs}'
         tb = SummaryWriter(comment=comment)
 
         args.num_prototypes = num_prototypes
-        model = ProtoNetNLP(args)
-        model.cuda(args.gpu)
+        model = []
+        if args.model == 'p_dist':
+            model = ProtoPNetDist(args)
+        elif args.model == 'p_conv':
+            model = ProtoPNetConv(args)
+        elif args.model == 'dist':
+            model = ProtoNet(args)
 
+        model.cuda(args.gpu)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
         ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
         interp_criteria = utils.ProtoLoss()
@@ -107,15 +113,14 @@ def search(args, text_train, labels_train, text_val, labels_val, text_test, labe
             for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
                 optimizer.zero_grad()
 
-                outputs = model.forward(emb_batch)
-                prototype_distances, feature_vector_distances, predicted_label = outputs
+                prototype_distances, feature_vector_distances, predicted_label = model.forward(emb_batch)
 
                 # compute individual losses and backward step
                 ce_loss = ce_crit(predicted_label, label_batch)
                 r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
                 loss = ce_loss + \
-                       lambda2 * r1_loss + \
-                       lambda3 * r2_loss
+                       lambda1 * r1_loss + \
+                       lambda2 * r2_loss
 
                 _, predicted = torch.max(predicted_label.data, 1)
                 all_preds += predicted.cpu().numpy().tolist()
@@ -152,8 +157,8 @@ def search(args, text_train, labels_train, text_val, labels_val, text_test, labe
                     ce_loss = ce_crit(predicted_label, labels_val)
                     r1_loss, r2_loss = interp_criteria(feature_vector_distances, prototype_distances)
                     loss_val = ce_loss + \
-                           lambda2 * r1_loss + \
-                           lambda3 * r2_loss
+                           lambda1 * r1_loss + \
+                           lambda2 * r2_loss
 
                     _, predicted_val = torch.max(predicted_label.data, 1)
                     acc_val = balanced_accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
@@ -176,7 +181,7 @@ def search(args, text_train, labels_train, text_val, labels_val, text_test, labe
             _, predicted = torch.max(predicted_label.data, 1)
             acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
 
-        tb.add_hparams({"lr": lr, "bsize": batch_size, "lambda2": lambda2, "lambda3": lambda3},
+        tb.add_hparams({"lr": lr, "bsize": batch_size, "lambda1": lambda1, "lambda2": lambda2},
                         dict(best_accuracy=best_acc, test_accuarcy=acc_test))
 
     tb.close()
@@ -203,7 +208,7 @@ if __name__ == '__main__':
     args.class_weights = [1-balance, balance]
 
     if args.one_shot:
-        idx = random.sample(range(len(text_train)),100)
+        idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
         labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 
