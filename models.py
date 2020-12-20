@@ -8,7 +8,7 @@ class ProtoNet(nn.Module):
     def __init__(self, args):
         super(ProtoNet, self).__init__()
 
-        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu)
+        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
         enc_size = self.sentBert.get_sentence_embedding_dimension()
         for param in self.sentBert.parameters():
             param.requires_grad = False
@@ -29,11 +29,11 @@ class ProtoNet(nn.Module):
         return self.protolayer
 
     def get_proto_weights(self):
-        return list(self.fc.children())[-1].weight.T.cpu().detach().numpy()
+        return self.fc.weight.T.cpu().detach().numpy()
 
     def compute_embedding(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
-        embedding = embedding.cuda(gpu)
+        embedding = embedding.to(f'cuda:{gpu}')
         return embedding
 
     @staticmethod
@@ -46,21 +46,22 @@ class ProtoPNet(nn.Module):
     def __init__(self, args):
         super(ProtoPNet, self).__init__()
 
-        self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased', device=args.gpu)
+        self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased', device=args.gpu[0])
         self.Bert = BertModel.from_pretrained('bert-large-cased')
         self.enc_size = 1024 # needs to be adjusted
+        self.proto_size = args.proto_size
         for param in self.Bert.parameters():
             param.requires_grad = False
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
     def get_proto_weights(self):
-        return list(self.fc.children())[-1].weight.T.cpu().detach().numpy()
+        return self.fc.weight.T.cpu().detach().numpy()
 
     def compute_embedding(self, x, gpu):
         inputs = self.tokenizer(x, return_tensors="pt", truncation=True, padding=True)
-        inputs['input_ids'] = inputs['input_ids'].cuda(gpu)
-        inputs['attention_mask'] = inputs['attention_mask'].cuda(gpu)
-        inputs['token_type_ids'] = inputs['token_type_ids'].cuda(gpu)
+        inputs['input_ids'] = inputs['input_ids'].to(f'cuda:{gpu}')
+        inputs['attention_mask'] = inputs['attention_mask'].to(f'cuda:{gpu}')
+        inputs['token_type_ids'] = inputs['token_type_ids'].to(f'cuda:{gpu}')
         outputs = self.Bert(**inputs)
         word_embedding = outputs[0]
         # cls_embedding = outputs[1]
@@ -102,17 +103,15 @@ class ProtoPNetConv(ProtoPNet):
     def get_protos(self):
         return self.protolayer
 
-    @staticmethod
-    def nearest_neighbors(prototype_distances):
-        min_distances_sent = -torch.nn.functional.max_pool2d(-prototype_distances,
-                                      kernel_size=(prototype_distances.size()[2],
-                                                   prototype_distances.size()[3]))
-        nearest_sentence = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze()
+    def nearest_neighbors(self,prototype_distances):
+        min_distances_sent = -F.max_pool1d(-prototype_distances, kernel_size=prototype_distances.size(-1))
+        nearest_sent = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze()
 
-        min_distances_word = -torch.nn.functional.max_pool2d(-prototype_distances.permute(1,2,0,3),
-                                      kernel_size=(prototype_distances.size()[0],1))
-        nearest_word = torch.argmin(min_distances_word, dim=1).squeeze()
-        return nearest_sentence.cpu().numpy(), nearest_word.cpu().numpy()
+        min_distances_word = -F.max_pool1d(-prototype_distances.permute(1,2,0), kernel_size=prototype_distances.size(0))
+        nearest_word = torch.argmin(min_distances_word.squeeze(), dim=1).squeeze()
+        # only finds the beginning word id since we did a convolution. so we have to add the proto_size subsequent words
+        nearest_words = [[word_id+x for x in range(self.proto_size)] for word_id in nearest_word.cpu().numpy()]
+        return nearest_sent.cpu().numpy(), nearest_words
 
 
 class ProtoPNetDist(ProtoPNet):
@@ -127,7 +126,7 @@ class ProtoPNetDist(ProtoPNet):
         # embedding.unsqueeze_(1)
         prototype_distances = torch.cdist(embedding.unsqueeze(1), self.protolayer, p=2)  # get prototype distances
         feature_vector_distances = prototype_distances.T
-        min_distances = -torch.nn.functional.max_pool2d(-prototype_distances,
+        min_distances = -F.max_pool2d(-prototype_distances,
                                       kernel_size=(prototype_distances.size()[2],
                                                    prototype_distances.size()[3]))
         min_distances.squeeze_()
@@ -139,12 +138,12 @@ class ProtoPNetDist(ProtoPNet):
 
     @staticmethod
     def nearest_neighbors(prototype_distances):
-        min_distances_sent = -torch.nn.functional.max_pool2d(-prototype_distances,
+        min_distances_sent = -F.max_pool2d(-prototype_distances,
                                       kernel_size=(prototype_distances.size()[2],
                                                    prototype_distances.size()[3]))
         nearest_sentence = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze()
 
-        min_distances_word = -torch.nn.functional.max_pool2d(-prototype_distances.permute(1,2,0,3),
+        min_distances_word = -F.max_pool2d(-prototype_distances.permute(1,2,0,3),
                                       kernel_size=(prototype_distances.size()[0],1))
         nearest_word = torch.argmin(min_distances_word, dim=1).squeeze()
         return nearest_sentence.cpu().numpy(), nearest_word.cpu().numpy()
@@ -154,7 +153,7 @@ class BaseNet(nn.Module):
     def __init__(self, args):
         super(BaseNet, self).__init__()
 
-        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu)
+        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
         enc_size = self.sentBert.get_sentence_embedding_dimension()
         for param in self.sentBert.parameters():
             param.requires_grad = False
@@ -171,5 +170,5 @@ class BaseNet(nn.Module):
 
     def compute_embedding(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
-        embedding = embedding.cuda(gpu)
+        embedding = embedding.to(f'cuda:{gpu}')
         return embedding

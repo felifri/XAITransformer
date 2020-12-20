@@ -40,7 +40,7 @@ parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
 parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
                     help='Select data name')
-parser.add_argument('--num_prototypes', default=10, type = int,
+parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
 parser.add_argument('-l1','--lambda1', default=0.1, type=float,
                     help='Weight for prototype loss computation')
@@ -50,7 +50,7 @@ parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
+parser.add_argument('-g','--gpu', type=int, default=0, nargs='+', help='GPU device number, -1  means CPU.')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE'],
@@ -74,16 +74,18 @@ def train(args, text_train, labels_train, text_val, labels_val):
     elif args.model=='dist':
         model = ProtoNet(args)
 
-    # model = torch.nn.DataParallel(model, device_ids=args.gpu)
     print("Running on gpu {}".format(args.gpu))
-    model.cuda(args.gpu)
+    model = torch.nn.DataParallel(model, device_ids=args.gpu)
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
+    model.to(f'cuda:{args.gpu[0]}')
+    embedding = model.module.compute_embedding(text_train, args.gpu[0])
+    embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
     interp_criteria = utils.ProtoLoss()
 
     model.train()
-    embedding = model.compute_embedding(text_train, args.gpu)
-    embedding_val = model.compute_embedding(text_val, args.gpu)
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
@@ -155,7 +157,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
 
             utils.save_checkpoint(save_dir, {
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': model.module.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'hyper_params': args,
                 'acc_val': acc_val,
@@ -182,13 +184,13 @@ def test(args, text_train, labels_train, text_test, labels_test):
 
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
-    model.cuda(args.gpu)
+    model.to(f'cuda:{args.gpu[0]}')
     model.eval()
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
     interp_criteria = utils.ProtoLoss()
 
-    embedding = model.compute_embedding(text_train, args.gpu)
-    embedding_test = model.compute_embedding(text_test, args.gpu)
+    embedding = model.compute_embedding(text_train, args.gpu[0])
+    embedding_test = model.compute_embedding(text_test, args.gpu[0])
 
     with torch.no_grad():
         outputs = model.forward(embedding_test)
@@ -205,17 +207,14 @@ def test(args, text_train, labels_train, text_test, labels_test):
         acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
         print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
-        # get prototypes
-        prototypes = model.get_protos()
-
         # "convert" prototype embedding to text (take text of nearest training sample)
         proto_texts = []
         if args.model.startswith("p_"):
             nearest_sent_ids, nearest_word_ids = model.nearest_neighbors(prototype_distances)
-            text_tknzd = model.tokenizer(text_train).input_ids
+            text_tknzd = model.tokenizer(text_train, truncation=True, padding=True).input_ids
             for (s_index, w_index) in zip(nearest_sent_ids, nearest_word_ids):
-                proto_texts.append([s_index, np.array(text_tknzd[s_index])[w_index].tolist()])
-            proto_texts = model.tokenizer.decode(proto_texts)
+                token2text = model.tokenizer.decode(np.array(text_tknzd[s_index])[w_index].tolist())
+                proto_texts.append([s_index, token2text])
         else:
             nearest_ids = model.nearest_neighbors(prototype_distances)
             proto_texts = [[index, text_train[index]] for index in nearest_ids]
@@ -232,11 +231,14 @@ def test(args, text_train, labels_train, text_test, labels_test):
             txt_file.write("\n")
         txt_file.close()
 
+        # get prototypes
+        prototypes = model.get_protos()
+
         embedding = embedding.cpu().numpy()
         prototypes = prototypes.cpu().numpy()
         labels_train = labels_train.cpu().numpy()
         utils.visualize_protos(embedding, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
-        # visualize_protos(embedding, labels_train, prototypes, n_components=3, type=args.trans_type, save_path=os.path.dirname(save_path))
+        # utils.visualize_protos(embedding, labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
 if __name__ == '__main__':
@@ -244,17 +246,25 @@ if __name__ == '__main__':
     np.random.seed(0)
     args = parser.parse_args()
 
-    if args.gpu >= 0:
-        torch.cuda.set_device(args.gpu)
-
     text, labels = utils.load_data(args)
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, stratify=labels)
     text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
                                                                          stratify=labels_test)
-    labels_train = torch.LongTensor(labels_train).cuda(args.gpu)
-    labels_val = torch.LongTensor(labels_val).cuda(args.gpu)
-    labels_test = torch.LongTensor(labels_test).cuda(args.gpu)
+    # num_examples must be divisible by num_gpus for data parallelization
+    num_gpus = len(args.gpu)
+    if num_gpus > 1:
+        overhead = len(labels_val) % num_gpus
+        labels_val = labels_val[:len(labels_val) - overhead]
+        text_val = text_val[:len(text_val) - overhead]
+        overhead = len(labels_test) % num_gpus
+        labels_test = labels_test[:len(labels_test) - overhead]
+        text_test = text_test[:len(text_test) - overhead]
+
+    labels_train = torch.LongTensor(labels_train).to(f'cuda:{args.gpu[0]}')
+    labels_val = torch.LongTensor(labels_val).to(f'cuda:{args.gpu[0]}')
+    labels_test = torch.LongTensor(labels_test).to(f'cuda:{args.gpu[0]}')
+
     # set class weights for balanced cross entropy computation
     balance = labels.count(0) / len(labels)
     args.class_weights = [1-balance, balance]
@@ -262,10 +272,11 @@ if __name__ == '__main__':
     if args.one_shot:
         idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
-        labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
+        labels_train = torch.LongTensor([labels_train[i] for i in idx]).to(f'cuda:{args.gpu[0]}')
 
     if args.mode == 'both':
         train(args, text_train, labels_train, text_val, labels_val)
+        torch.cuda.empty_cache() # is required since BERT encoding is only possible on 1 GPU (memory limitation)
         test(args, text_train, labels_train, text_test, labels_test)
     elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)

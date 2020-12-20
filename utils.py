@@ -11,7 +11,10 @@ import pickle
 
 def get_batches(embedding, labels, batch_size=128):
     def divide_chunks(l, n):
-        for i in range(0, len(l), n):
+        discard = 0
+        if len(l)%n != 0:                   # discard last batch if not a full batch
+            discard = len(l)%n
+        for i in range(0, len(l)-discard, n):
             yield l[i:i + n]
     tmp = list(zip(embedding, labels))
     random.shuffle(tmp)
@@ -27,12 +30,6 @@ class ProtoLoss:
     def __call__(self, feature_vector_distances, prototype_distances):
         """
         Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-
-        :param feature_vector_distances: tensor of size [n_prototypes, n_batches], distance between the data encodings
-                                          of the autoencoder and the prototypes
-        :param prototype_distances: tensor of size [n_batches, n_prototypes], distance between the prototypes and
-                                    data encodings of the autoencoder
-        :return:
         """
         #assert prototype_distances.shape == feature_vector_distances.T.shape
         r1_loss = torch.mean(torch.min(feature_vector_distances, dim=1)[0])
