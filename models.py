@@ -48,11 +48,15 @@ class ProtoPNet(nn.Module):
 
         self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased', device=args.gpu[0])
         self.Bert = BertModel.from_pretrained('bert-large-cased')
-        self.enc_size = 1024 # needs to be adjusted
-        self.proto_size = args.proto_size
         for param in self.Bert.parameters():
             param.requires_grad = False
+        self.enc_size = 1024  # needs to be adjusted
+        self.proto_size = args.proto_size
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
+        self.emb_trafo = nn.Sequential(
+                nn.Linear(in_features=self.enc_size, out_features=self.enc_size),
+                nn.ReLU()
+                )
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -77,10 +81,11 @@ class ProtoPNetConv(ProtoPNet):
         self.ones = nn.Parameter(torch.ones(args.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
 
     def forward(self, embedding):
+        # embedding = self.emb_trafo(embedding)
         prototype_distances = self.l2_convolution(embedding)
         feature_vector_distances =  prototype_distances.T # get feature vector distances
 
-        min_distances = -F.max_pool1d(-prototype_distances, kernel_size=(prototype_distances.size()[2]))
+        min_distances = -F.max_pool1d(-prototype_distances, kernel_size=(prototype_distances.size(-1)))
         min_distances.squeeze_()
         class_out = self.fc(min_distances)
         return prototype_distances, feature_vector_distances, class_out
@@ -105,32 +110,54 @@ class ProtoPNetConv(ProtoPNet):
 
     def nearest_neighbors(self,prototype_distances):
         min_distances_sent = -F.max_pool1d(-prototype_distances, kernel_size=prototype_distances.size(-1))
-        nearest_sent = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze()
+        nearest_sent = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze().cpu().numpy()
 
         min_distances_word = -F.max_pool1d(-prototype_distances.permute(1,2,0), kernel_size=prototype_distances.size(0))
-        nearest_word = torch.argmin(min_distances_word.squeeze(), dim=1).squeeze()
-        # only finds the beginning word id since we did a convolution. so we have to add the proto_size subsequent words
-        nearest_words = [[word_id+x for x in range(self.proto_size)] for word_id in nearest_word.cpu().numpy()]
-        return nearest_sent.cpu().numpy(), nearest_words
+        nearest_word = torch.argmin(min_distances_word.squeeze(), dim=1).squeeze().cpu().numpy()
+        # only finds the beginning word id since we did a convolution. so we have to add the # of proto_size subsequent words
+        nearest_words = [[word_id+x for x in range(self.proto_size)] for word_id in nearest_word]
+        return nearest_sent, nearest_words
 
 
 class ProtoPNetDist(ProtoPNet):
     def __init__(self, args):
         super(ProtoPNetDist, self).__init__(args)
 
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((1, args.num_prototypes, args.proto_size, self.enc_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, args.proto_size, self.enc_size))),
                                        requires_grad=True)
+        self.num_prototypes = args.num_prototypes
+
+    def compute_distance(self, embedding):
+        combs_batch = []
+        for batch in range(embedding.size(0)):
+            combs_proto = []
+            for proto in range(self.num_prototypes):
+                combs_sentence = []
+                for feature in range(self.enc_size):
+                    combs_sentence.append(torch.combinations(embedding[batch,:,feature], r=self.proto_size))
+                stacked = torch.stack(combs_sentence).view(self.proto_size,-1,self.enc_size) # proto_size x num_combinations x enc_size
+                dist = torch.cdist(stacked, self.protolayer[:,proto,:,:].permute(0,2,1,3)) # shape proto_size x num_combinations
+                dist = torch.sum(dist, dim=1).squeeze() # sum along proto_size to get one dist value for the prototype
+                dist = torch.min(dist)
+                combs_proto.append(dist)
+            stacked_proto = torch.stack(combs_proto)
+            combs_batch.append(stacked_proto)
+        distances = torch.stack(combs_batch).view(-1,embedding.size(0),self.proto_size,self.enc_size)
+        return distances
 
     def forward(self, embedding):
+        # embedding = self.emb_trafo(embedding)
         # adjust embedding shape
         # embedding.unsqueeze_(1)
-        prototype_distances = torch.cdist(embedding.unsqueeze(1), self.protolayer, p=2)  # get prototype distances
+        distances = torch.cdist(embedding.unsqueeze(1), self.protolayer, p=2)  # get prototype distances
+        # pool along words per sentence, to get only #proto_size smallest distances per sentence and prototype
+        # and compute mean along this #proto_size to get only one value per sentence and prototype
+        min_distances = -F.max_pool2d(-distances,
+                                      kernel_size=(distances.size(2), 1))
+        prototype_distances = torch.mean(min_distances, dim=-1).squeeze()
+        # prototype_distances = self.compute_distance(embedding)
         feature_vector_distances = prototype_distances.T
-        min_distances = -F.max_pool2d(-prototype_distances,
-                                      kernel_size=(prototype_distances.size()[2],
-                                                   prototype_distances.size()[3]))
-        min_distances.squeeze_()
-        class_out = self.fc(min_distances)
+        class_out = self.fc(prototype_distances)
         return prototype_distances, feature_vector_distances, class_out
 
     def get_protos(self):
@@ -138,15 +165,16 @@ class ProtoPNetDist(ProtoPNet):
 
     @staticmethod
     def nearest_neighbors(prototype_distances):
-        min_distances_sent = -F.max_pool2d(-prototype_distances,
-                                      kernel_size=(prototype_distances.size()[2],
-                                                   prototype_distances.size()[3]))
-        nearest_sentence = torch.argmin(min_distances_sent.squeeze(), dim=0).squeeze()
+        min_distances_per_sentence = -F.max_pool2d(-prototype_distances,
+                                      kernel_size=(prototype_distances.size(2),1))
+        min_distances_sent = torch.mean(min_distances_per_sentence, dim=-1)
+        # get argmin for number of protos along number of sentence dimension
+        nearest_sentence = torch.argmin(min_distances_sent, dim=0).squeeze().cpu().numpy()
 
         min_distances_word = -F.max_pool2d(-prototype_distances.permute(1,2,0,3),
-                                      kernel_size=(prototype_distances.size()[0],1))
-        nearest_word = torch.argmin(min_distances_word, dim=1).squeeze()
-        return nearest_sentence.cpu().numpy(), nearest_word.cpu().numpy()
+                                      kernel_size=(prototype_distances.size(0),1))
+        nearest_word = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
+        return nearest_sentence, nearest_word
 
 
 class BaseNet(nn.Module):
