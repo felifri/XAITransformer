@@ -42,7 +42,7 @@ parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=0, help='GPU device number, -1  means CPU.')
+parser.add_argument('-g','--gpu', type=int, default=0, nargs='+', help='GPU device number, -1  means CPU.')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
@@ -91,7 +91,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
 
         for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
             optimizer.zero_grad()
-
+            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
             outputs = model.forward(emb_batch)
             predicted_label = outputs
 
@@ -116,6 +116,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
             with torch.no_grad():
+                embedding_val = embedding_val.to(f'cuda:{args.gpu[0]}')
                 outputs = model.forward(embedding_val)
                 predicted_label = outputs
 
@@ -134,6 +135,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
             model.eval()
             embedding_test = model.compute_embedding(text_test, args.gpu)
             with torch.no_grad():
+                embedding_test = embedding_test.to(f'cuda:{args.gpu[0]}')
                 outputs = model.forward(embedding_test)
                 predicted_label = outputs
                 _, predicted = torch.max(predicted_label.data, 1)

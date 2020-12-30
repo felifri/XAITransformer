@@ -33,7 +33,7 @@ class ProtoNet(nn.Module):
 
     def compute_embedding(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
-        embedding = embedding.to(f'cuda:{gpu}')
+        # embedding = embedding.to(f'cuda:{gpu}')
         return embedding
 
     @staticmethod
@@ -63,11 +63,11 @@ class ProtoPNet(nn.Module):
 
     def compute_embedding(self, x, gpu):
         inputs = self.tokenizer(x, return_tensors="pt", truncation=True, padding=True)
-        inputs['input_ids'] = inputs['input_ids'].to(f'cuda:{gpu}')
-        inputs['attention_mask'] = inputs['attention_mask'].to(f'cuda:{gpu}')
-        inputs['token_type_ids'] = inputs['token_type_ids'].to(f'cuda:{gpu}')
+        # inputs['input_ids'] = inputs['input_ids'].to(f'cuda:{gpu}')
+        # inputs['attention_mask'] = inputs['attention_mask'].to(f'cuda:{gpu}')
+        # inputs['token_type_ids'] = inputs['token_type_ids'].to(f'cuda:{gpu}')
         outputs = self.Bert(**inputs)
-        word_embedding = outputs[0]
+        word_embedding = outputs[0]#.cpu().numpy()
         # cls_embedding = outputs[1]
         return word_embedding
 
@@ -198,5 +198,5 @@ class BaseNet(nn.Module):
 
     def compute_embedding(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
-        embedding = embedding.to(f'cuda:{gpu}')
+        # embedding = embedding.to(f'cuda:{gpu}')
         return embedding

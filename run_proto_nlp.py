@@ -102,8 +102,10 @@ def train(args, text_train, labels_train, text_val, labels_val):
         rtpt.step(subtitle=f"epoch={epoch+1}")
 
         for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
-            optimizer.zero_grad()
+            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
 
+            optimizer.zero_grad()
             prototype_distances, feature_vector_distances, predicted_label = model.forward(emb_batch)
 
             # compute individual losses and backward step
@@ -141,6 +143,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
             with torch.no_grad():
+                embedding_val = embedding_val.to(f'cuda:{args.gpu[0]}')
                 outputs = model.forward(embedding_val)
                 prototype_distances, feature_vector_distances, predicted_label = outputs
 
@@ -193,6 +196,7 @@ def test(args, text_train, labels_train, text_test, labels_test):
     embedding_test = model.compute_embedding(text_test, args.gpu[0])
 
     with torch.no_grad():
+        embedding_test = embedding_test.to(f'cuda:{args.gpu[0]}')
         outputs = model.forward(embedding_test)
         prototype_distances, feature_vector_distances, predicted_label = outputs
 
@@ -261,9 +265,9 @@ if __name__ == '__main__':
         labels_test = labels_test[:len(labels_test) - overhead]
         text_test = text_test[:len(text_test) - overhead]
 
-    labels_train = torch.LongTensor(labels_train).to(f'cuda:{args.gpu[0]}')
-    labels_val = torch.LongTensor(labels_val).to(f'cuda:{args.gpu[0]}')
-    labels_test = torch.LongTensor(labels_test).to(f'cuda:{args.gpu[0]}')
+    labels_train = torch.LongTensor(labels_train)#.to(f'cuda:{args.gpu[0]}')
+    labels_val = torch.LongTensor(labels_val)#.to(f'cuda:{args.gpu[0]}')
+    labels_test = torch.LongTensor(labels_test)#.to(f'cuda:{args.gpu[0]}')
 
     # set class weights for balanced cross entropy computation
     balance = labels.count(0) / len(labels)
@@ -272,7 +276,7 @@ if __name__ == '__main__':
     if args.one_shot:
         idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
-        labels_train = torch.LongTensor([labels_train[i] for i in idx]).to(f'cuda:{args.gpu[0]}')
+        labels_train = torch.LongTensor([labels_train[i] for i in idx])#.to(f'cuda:{args.gpu[0]}')
 
     if args.mode == 'both':
         train(args, text_train, labels_train, text_val, labels_val)
