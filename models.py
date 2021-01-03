@@ -46,7 +46,7 @@ class ProtoPNet(nn.Module):
     def __init__(self, args):
         super(ProtoPNet, self).__init__()
 
-        self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased', device=args.gpu[0])
+        self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
         self.Bert = BertModel.from_pretrained('bert-large-cased')
         for param in self.Bert.parameters():
             param.requires_grad = False
@@ -63,11 +63,11 @@ class ProtoPNet(nn.Module):
 
     def compute_embedding(self, x, gpu):
         inputs = self.tokenizer(x, return_tensors="pt", truncation=True, padding=True)
-        # inputs['input_ids'] = inputs['input_ids'].to(f'cuda:{gpu}')
-        # inputs['attention_mask'] = inputs['attention_mask'].to(f'cuda:{gpu}')
-        # inputs['token_type_ids'] = inputs['token_type_ids'].to(f'cuda:{gpu}')
+        inputs['input_ids'] = inputs['input_ids'].to(f'cuda:{gpu}')
+        inputs['attention_mask'] = inputs['attention_mask'].to(f'cuda:{gpu}')
+        inputs['token_type_ids'] = inputs['token_type_ids'].to(f'cuda:{gpu}')
         outputs = self.Bert(**inputs)
-        word_embedding = outputs[0]#.cpu().numpy()
+        word_embedding = outputs[0]
         # cls_embedding = outputs[1]
         return word_embedding
 

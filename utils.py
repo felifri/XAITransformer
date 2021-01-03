@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pickle
 
+# __import__("pdb").set_trace()
 
 def get_batches(embedding, labels, batch_size=128):
     def divide_chunks(l, n):
@@ -184,3 +185,20 @@ def load_data(args):
     elif tag=='reviews':
         texts, labels = get_reviews(args)
     return texts, labels
+
+
+###### load/ store embedding to not compute it every single run again ######
+
+def load_embedding(args, name='Bert'):
+    path = os.path.join('data/embedding', args.data_name, name, '.pkl')
+    return pickle.load(open(path, 'rb'))
+
+def save_embedding(text, args, fname='Bert'):
+    from models import ProtoPNetConv, ProtoNet
+    if fname== 'Bert':
+        model = ProtoPNetConv(args)
+    elif fname== 'SentBert':
+        model = ProtoNet(args)
+    embedding = model.compute_embedding(text, args.gpu[0])
+    path = os.path.join('data/embedding', args.data_name, fname)
+    pickle.dump(embedding, open(path, 'wb'))

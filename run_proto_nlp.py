@@ -38,7 +38,7 @@ parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
-parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
                     help='Select data name')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -78,8 +78,13 @@ def train(args, text_train, labels_train, text_val, labels_val):
     model = torch.nn.DataParallel(model, device_ids=args.gpu)
     # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
-    embedding = model.module.compute_embedding(text_train, args.gpu[0])
-    embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+    try:
+        embedding = utils.load_embedding(args, 'train')
+        embedding_val = utils.load_embedding(args, 'val')
+    except:
+        embedding = model.module.compute_embedding(text_train, args.gpu[0])
+        embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
@@ -144,6 +149,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
             model.eval()
             with torch.no_grad():
                 embedding_val = embedding_val.to(f'cuda:{args.gpu[0]}')
+                labels_val = labels_val.to(f'cuda:{args.gpu[0]}')
                 outputs = model.forward(embedding_val)
                 prototype_distances, feature_vector_distances, predicted_label = outputs
 
@@ -175,7 +181,6 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model_paths.sort()
     model_path = model_paths[-1]
     print("\nStarting evaluation, loading model:", model_path)
-    # test_dir = "./experiments/test_results/"
 
     model = []
     if args.model=='p_dist':
@@ -191,12 +196,17 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
     interp_criteria = utils.ProtoLoss()
-
-    embedding = model.compute_embedding(text_train, args.gpu[0])
-    embedding_test = model.compute_embedding(text_test, args.gpu[0])
+    try:
+        embedding = utils.load_embedding('train')
+        embedding_test = utils.load_embedding('test')
+    except:
+        embedding = model.compute_embedding(text_train, args.gpu[0])
+        embedding_test = model.compute_embedding(text_test, args.gpu[0])
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     with torch.no_grad():
         embedding_test = embedding_test.to(f'cuda:{args.gpu[0]}')
+        labels_test = labels_test.to(f'cuda:{args.gpu[0]}')
         outputs = model.forward(embedding_test)
         prototype_distances, feature_vector_distances, predicted_label = outputs
 
@@ -265,9 +275,9 @@ if __name__ == '__main__':
         labels_test = labels_test[:len(labels_test) - overhead]
         text_test = text_test[:len(text_test) - overhead]
 
-    labels_train = torch.LongTensor(labels_train)#.to(f'cuda:{args.gpu[0]}')
-    labels_val = torch.LongTensor(labels_val)#.to(f'cuda:{args.gpu[0]}')
-    labels_test = torch.LongTensor(labels_test)#.to(f'cuda:{args.gpu[0]}')
+    labels_train = torch.LongTensor(labels_train)
+    labels_val = torch.LongTensor(labels_val)
+    labels_test = torch.LongTensor(labels_test)
 
     # set class weights for balanced cross entropy computation
     balance = labels.count(0) / len(labels)
@@ -276,11 +286,10 @@ if __name__ == '__main__':
     if args.one_shot:
         idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
-        labels_train = torch.LongTensor([labels_train[i] for i in idx])#.to(f'cuda:{args.gpu[0]}')
+        labels_train = torch.LongTensor([labels_train[i] for i in idx])
 
     if args.mode == 'both':
         train(args, text_train, labels_train, text_val, labels_val)
-        torch.cuda.empty_cache() # is required since BERT encoding is only possible on 1 GPU (memory limitation)
         test(args, text_train, labels_train, text_test, labels_test)
     elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
