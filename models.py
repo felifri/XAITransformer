@@ -108,6 +108,7 @@ class ProtoPNetConv(ProtoPNet):
         xp = F.conv1d(input=x, weight=self.protolayer)
         # L2-distance aka x² - 2xp + p²
         distances = x2_patch_sum - 2 * xp + p2_reshape
+        distances = torch.sqrt(torch.abs(distances))
         return distances
 
     def conv_(self, x2):
