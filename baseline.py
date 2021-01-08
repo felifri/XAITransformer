@@ -1,6 +1,5 @@
 import argparse
 import sys
-import os
 import random
 
 import torch
@@ -16,67 +15,57 @@ except:
     from rtpt import RTPT
 
 from models import BaseNet
-import utils
-
+from utils import save_embedding, load_embedding, load_data
 # Create RTPT object
-rtpt = RTPT(name_initials='FF', experiment_name='Transformer_Prototype', max_iterations=100)
+rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=100)
 # Start the RTPT tracking
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('--lr', type=float, default=0.001,
-                    help='Learning rate')
-parser.add_argument('--cpu', action='store_true', default=False,
-                    help='Whether to use cpu')
+                    help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=100, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=256, type=int,
-                    help='Batch size')
+                    help='Select batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
-parser.add_argument('--data_name', default='reviews', type=str, choices=['reviews', 'toxicity'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
                     help='Select data name')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=0, nargs='+', help='GPU device number, -1  means CPU.')
+parser.add_argument('-g','--gpu', type=int, default=0, nargs='+',
+                    help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
-parser.add_argument('--discard', type=bool, default=False, help='Whether edge cases in the middle between completely '
-                                                                'toxic (1) and not toxic at all (0) shall be omitted')
-
-def get_batches(embedding, labels, batch_size=128):
-    def divide_chunks(l, n):
-        for i in range(0, len(l), n):
-            yield l[i:i + n]
-    tmp = list(zip(embedding, labels))
-    random.shuffle(tmp)
-    embedding, labels = zip(*tmp)
-    embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
-    label_batches = list(divide_chunks(torch.stack(labels), batch_size))
-    return embedding_batches, label_batches
-
-def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
-    if best:
-        save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
-        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-        torch.save(state, save_path_checkpoint)
-
+parser.add_argument('--discard', type=bool, default=False,
+                    help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
-
     model = BaseNet(args)
     print("Running on gpu {}".format(args.gpu))
-    model.cuda(args.gpu)
+    model = torch.nn.DataParallel(model, device_ids=args.gpu)
+    model.to(f'cuda:{args.gpu[0]}')
+
+    fname = 'SentBert'
+    try:
+        embedding_train = load_embedding(args, fname, 'train')
+        embedding_val = load_embedding(args, fname, 'val')
+    except:
+        embedding_train = model.module.compute_embedding(text_train, args.gpu[0])
+        embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+        save_embedding(embedding_train, args, fname, 'train')
+        save_embedding(embedding_val, args, fname, 'val')
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu))
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
 
     model.train()
-    embedding = model.compute_embedding(text_train, args.gpu)
-    embedding_val = model.compute_embedding(text_val, args.gpu)
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
@@ -84,16 +73,17 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         all_preds = []
         all_labels = []
         losses_per_batch = []
-        emb_batches, label_batches = get_batches(embedding, labels_train, args.batch_size)
-
+        train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
+                                                  shuffle=True)#, drop_last=True, num_workers=len(args.gpu))
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch+1}")
 
-        for i,(emb_batch, label_batch) in enumerate(zip(emb_batches, label_batches)):
-            optimizer.zero_grad()
+        for emb_batch, label_batch in train_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            outputs = model.forward(emb_batch)
-            predicted_label = outputs
+            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+
+            optimizer.zero_grad()
+            predicted_label = model.forward(emb_batch)
 
             # compute individual losses and backward step
             loss = ce_crit(predicted_label, label_batch)
@@ -115,57 +105,85 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
+            all_preds = []
+            all_labels = []
+            losses_per_batch = []
+            val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
+                                                      shuffle=False)#, drop_last=True, num_workers=len(args.gpu))
             with torch.no_grad():
-                embedding_val = embedding_val.to(f'cuda:{args.gpu[0]}')
-                outputs = model.forward(embedding_val)
-                predicted_label = outputs
+                for emb_batch, label_batch in val_batches:
+                    emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+                    predicted_label = model.forward(emb_batch)
 
-                # compute individual losses and backward step
-                loss = ce_crit(predicted_label, labels_val)
+                    # compute individual losses and backward step
+                    loss = ce_crit(predicted_label, label_batch)
+                    losses_per_batch.append(float(loss))
+                    _, predicted = torch.max(predicted_label.data, 1)
+                    all_preds += predicted.cpu().numpy().tolist()
+                    all_labels += label_batch.cpu().numpy().tolist()
 
-                _, predicted_val = torch.max(predicted_label.data, 1)
-                acc_val = balanced_accuracy_score(labels_val.cpu().numpy(), predicted_val.cpu().numpy())
-                print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss, 100 * acc_val))
+                loss_val = np.mean(losses_per_batch)
+
+                acc_val = balanced_accuracy_score(all_labels, all_preds)
+                print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss_val, 100 * acc_val))
                 if acc_val >= best_acc:
                     best_acc = acc_val
                     best_model = model.state_dict()
 
             model.load_state_dict(best_model)
-            model.cuda(args.gpu)
+            model.to(f'cuda:{args.gpu[0]}')
             model.eval()
-            embedding_test = model.compute_embedding(text_test, args.gpu)
+            fname = 'SentBert'
+            try:
+                embedding_train = load_embedding(args, fname, 'train')
+                embedding_test = load_embedding(args, fname, 'test')
+            except:
+                embedding_train = model.compute_embedding(text_train, args.gpu[0])
+                embedding_test = model.compute_embedding(text_test, args.gpu[0])
+                save_embedding(embedding_train, args, fname, 'train')
+                save_embedding(embedding_test, args, fname, 'test')
+                torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
+            all_preds = []
+            all_labels = []
+            losses_per_batch = []
+            test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
+                                                       shuffle=False)#, num_workers=len(args.gpu))
             with torch.no_grad():
-                embedding_test = embedding_test.to(f'cuda:{args.gpu[0]}')
-                outputs = model.forward(embedding_test)
-                predicted_label = outputs
-                _, predicted = torch.max(predicted_label.data, 1)
-                acc_test = balanced_accuracy_score(labels_test.cpu().numpy(), predicted.cpu().numpy())
-                loss = ce_crit(predicted_label, labels_test)
+                for emb_batch, label_batch in test_batches:
+                    emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+                    predicted_label = model.forward(emb_batch)
+                    loss = ce_crit(predicted_label, label_batch)
+
+                    losses_per_batch.append(float(loss))
+                    _, predicted = torch.max(predicted_label.data, 1)
+                    all_preds += predicted.cpu().numpy().tolist()
+                    all_labels += label_batch.cpu().numpy().tolist()
+
+                loss = np.mean(losses_per_batch)
+                acc_test = balanced_accuracy_score(all_labels, all_preds)
                 print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
 if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
+    random.seed(0)
     args = parser.parse_args()
 
-    if args.gpu >= 0:
-        torch.cuda.set_device(args.gpu)
-
-    text, labels = utils.load_data(args)
+    text, labels = load_data(args)
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, stratify=labels)
     text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
                                                                          stratify=labels_test)
-    labels_train = torch.LongTensor(labels_train).cuda(args.gpu)
-    labels_val = torch.LongTensor(labels_val).cuda(args.gpu)
-    labels_test = torch.LongTensor(labels_test).cuda(args.gpu)
+
     # set class weights for balanced cross entropy computation
     balance = labels.count(0) / len(labels)
     args.class_weights = [1-balance, balance]
 
     if args.one_shot:
-        idx = random.sample(range(len(text_train)),100)
+        idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
-        labels_train = torch.LongTensor([labels_train[i] for i in idx]).cuda(args.gpu)
 
     train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test)

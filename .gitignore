@@ -1,4 +1,5 @@
 mnist_example/
+data/embedding
 data/rt-polarity
 data/realtoxicityprompts
 __pycache__/

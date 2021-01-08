@@ -1,5 +1,4 @@
 import os
-import random
 import torch
 from sklearn.decomposition import PCA
 from MulticoreTSNE import MulticoreTSNE as TSNE
@@ -10,32 +9,22 @@ import pickle
 
 # __import__("pdb").set_trace()
 
-def get_batches(embedding, labels, batch_size=128):
-    def divide_chunks(l, n):
-        discard = 0
-        if len(l)%n != 0:                   # discard last batch if not a full batch
-            discard = len(l)%n
-        for i in range(0, len(l)-discard, n):
-            yield l[i:i + n]
-    tmp = list(zip(embedding, labels))
-    random.shuffle(tmp)
-    embedding, labels = zip(*tmp)
-    embedding_batches = list(divide_chunks(torch.stack(embedding), batch_size))
-    label_batches = list(divide_chunks(torch.stack(labels), batch_size))
-    return embedding_batches, label_batches
-
 class ProtoLoss:
     def __init__(self):
         pass
 
-    def __call__(self, feature_vector_distances, prototype_distances):
+    def __call__(self, prototype_distances):
         """
         Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
         """
-        #assert prototype_distances.shape == feature_vector_distances.T.shape
-        r1_loss = torch.mean(torch.min(feature_vector_distances, dim=1)[0])
+        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-        return r1_loss, r2_loss
+
+        # assures, that prototype is not too close to padding token and that prototype does not consists out of the
+        # same word multiple times
+        # p1_loss = torch.sum(torch.cdist(self.prototypes, pad_token, p=2))
+        # p2_loss = torch.dist(self.prototypes, self.prototypes)
+        return r1_loss, r2_loss #, p1_loss, p2_loss
 
 def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
     if best:
@@ -56,7 +45,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
             [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
-        rnd_labels = labels[rnd_samples]
+        rnd_labels = [labels[i] for i in rnd_samples]
         rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
         fig = plt.figure()
         if n_components==2:
@@ -182,23 +171,22 @@ def load_data(args):
     texts, labels = [], []
     if tag=='toxicity':
         texts, labels = parse_all(tag, args)
-    elif tag=='reviews':
+    elif tag=='rt-polarity':
         texts, labels = get_reviews(args)
     return texts, labels
 
 
 ###### load/ store embedding to not compute it every single run again ######
 
-def load_embedding(args, name='Bert'):
-    path = os.path.join('data/embedding', args.data_name, name, '.pkl')
-    return pickle.load(open(path, 'rb'))
+def load_embedding(args, fname, set_name):
+    path = os.path.join('data/embedding', args.data_name, fname+'_'+set_name+'.pt')
+    assert os.path.isfile(path)
+    return torch.load(path)
 
-def save_embedding(text, args, fname='Bert'):
-    from models import ProtoPNetConv, ProtoNet
-    if fname== 'Bert':
-        model = ProtoPNetConv(args)
-    elif fname== 'SentBert':
-        model = ProtoNet(args)
-    embedding = model.compute_embedding(text, args.gpu[0])
-    path = os.path.join('data/embedding', args.data_name, fname)
-    pickle.dump(embedding, open(path, 'wb'))
+def save_embedding(embedding, args, fname, set_name):
+    path = os.path.join('data/embedding', args.data_name)
+    name = fname + '_' + set_name + '.pt'
+    os.makedirs(path, exist_ok=True, mode=0o777)
+    path = os.path.join(path, name)
+    if not os.path.exists(path):
+        torch.save(embedding, path)
