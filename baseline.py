@@ -17,14 +17,14 @@ except:
 from models import BaseNet
 from utils import save_embedding, load_embedding, load_data
 # Create RTPT object
-rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=100)
+rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=200)
 # Start the RTPT tracking
 rtpt.start()
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='Select learning rate')
-parser.add_argument('-e', '--num_epochs', default=100, type=int,
+parser.add_argument('-e', '--num_epochs', default=200, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=256, type=int,
                     help='Select batch size')

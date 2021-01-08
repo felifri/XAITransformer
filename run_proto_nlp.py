@@ -18,7 +18,7 @@ except:
     from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
-from utils import save_embedding, load_embedding, ProtoLoss, save_checkpoint, load_data, visualize_protos
+from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
 
 # Create RTPT object
 rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=200)
@@ -46,6 +46,8 @@ parser.add_argument('-l1','--lambda1', default=0.1, type=float,
                     help='Weight for prototype loss computation')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype loss computation')
+parser.add_argument('-l3','--lambda3', default=1, type=float,
+                    help='Weight for padding loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
@@ -95,7 +97,6 @@ def train(args, text_train, labels_train, text_val, labels_val):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
-    interp_criteria = ProtoLoss()
 
     model.train()
     num_epochs = args.num_epochs
@@ -108,6 +109,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
         ce_loss_per_batch = []
         r1_loss_per_batch = []
         r2_loss_per_batch = []
+        p1_loss_per_batch = []
         train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
                                                   shuffle=True)#, drop_last=True, num_workers=len(args.gpu))
         # Update the RTPT
@@ -122,10 +124,11 @@ def train(args, text_train, labels_train, text_val, labels_val):
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            r1_loss, r2_loss = interp_criteria(prototype_distances)
+            r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
             loss = ce_loss + \
                    args.lambda1 * r1_loss + \
-                   args.lambda2 * r2_loss
+                   args.lambda2 * r2_loss + \
+                   args.lambda3 * p1_loss
 
             _, predicted = torch.max(predicted_label.data, 1)
             all_preds += predicted.cpu().numpy().tolist()
@@ -138,18 +141,21 @@ def train(args, text_train, labels_train, text_val, labels_val):
             ce_loss_per_batch.append(float(ce_loss))
             r1_loss_per_batch.append(float(r1_loss))
             r2_loss_per_batch.append(float(r2_loss))
+            p1_loss_per_batch.append(float(p1_loss))
 
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         r1_mean_loss = np.mean(r1_loss_per_batch)
         r2_mean_loss = np.mean(r2_loss_per_batch)
+        p1_mean_loss = np.mean(p1_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
-        print("Epoch {}, mean loss {:.4f}, ce loss {:.4f}, r1 loss {:.4f}, "
-              "r2 loss {:.4f}, train acc {:.4f}".format(epoch+1,
+        print("Epoch {}, losses: mean {:.4f}, ce {:.4f}, r1 {:.4f}, "
+              "r2 {:.4f}, p1 {:.4f}, train acc {:.4f}".format(epoch+1,
                                                         mean_loss,
                                                         ce_mean_loss,
                                                         r1_mean_loss,
                                                         r2_mean_loss,
+                                                        p1_mean_loss,
                                                         100 * acc))
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
@@ -167,10 +173,11 @@ def train(args, text_train, labels_train, text_val, labels_val):
 
                     # compute individual losses and backward step
                     ce_loss = ce_crit(predicted_label, label_batch)
-                    r1_loss, r2_loss = interp_criteria(prototype_distances)
+                    r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
                     loss = ce_loss + \
                            args.lambda1 * r1_loss + \
-                           args.lambda2 * r2_loss
+                           args.lambda2 * r2_loss + \
+                           args.lambda3 * p1_loss
 
                     losses_per_batch.append(float(loss))
                     _, predicted = torch.max(predicted_label.data, 1)
@@ -213,7 +220,6 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model.to(f'cuda:{args.gpu[0]}')
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
-    interp_criteria = ProtoLoss()
 
     fname = 'Bert' if args.model.startswith('p') else 'SentBert'
     try:
@@ -239,10 +245,11 @@ def test(args, text_train, labels_train, text_test, labels_test):
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            r1_loss, r2_loss = interp_criteria(prototype_distances)
+            r1_loss, r2_loss, p1_loss = model.proto_loss(prototype_distances)
             loss = ce_loss + \
                    args.lambda1 * r1_loss + \
-                   args.lambda2 * r2_loss
+                   args.lambda2 * r2_loss + \
+                   args.lambda3 * p1_loss
 
             losses_per_batch.append(float(loss))
             _, predicted = torch.max(predicted_label.data, 1)

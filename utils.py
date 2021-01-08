@@ -9,23 +9,6 @@ import pickle
 
 # __import__("pdb").set_trace()
 
-class ProtoLoss:
-    def __init__(self):
-        pass
-
-    def __call__(self, prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        """
-        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-
-        # assures, that prototype is not too close to padding token and that prototype does not consists out of the
-        # same word multiple times
-        # p1_loss = torch.sum(torch.cdist(self.prototypes, pad_token, p=2))
-        # p2_loss = torch.dist(self.prototypes, self.prototypes)
-        return r1_loss, r2_loss #, p1_loss, p2_loss
-
 def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
     if best:
         save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
