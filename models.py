@@ -89,28 +89,6 @@ class ProtoPNet(nn.Module):
         embedding = torch.stack(word_embedding, dim=0)
         return embedding
 
-    def proto_loss(self, prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        """
-        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-
-        # assures that each prototype itself does not consist out of the exact same token multiple times
-        dist = []
-        comb = torch.combinations(torch.arange(self.proto_size), r=2)
-        for k, l in comb:
-            dist.append(torch.mean(torch.abs((self.protolayer[:, k, :] - self.protolayer[:, l, :])),dim=1))
-        # if distance small -> high penalty
-        p1_loss = 1 / torch.mean(torch.stack(dist))
-
-        # assures that each prototype is not too close to padding token
-        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True, truncation=True)
-        # pad_embedding = model.Bert(**pad_token)[0][0][-1]
-        # p2_loss = torch.sum(torch.cdist(self.prototypes, pad_embedding, p=2))
-        return r1_loss, r2_loss, p1_loss#, p2_loss
-
-
 class ProtoPNetConv(ProtoPNet):
     def __init__(self, args):
         super(ProtoPNetConv, self).__init__(args)
@@ -176,36 +154,30 @@ class ProtoPNetConv(ProtoPNet):
             text_nearest.extend(F.pad(text_tknzd[nearest_sent[j:j+num_filters[i]]],pad=[dil2pad,dil2pad]))
             j += num_filters[i]
 
-        for i, (s_index, w_indeces) in enumerate(zip(nearest_sent, nearest_words)):
-            token2text = model.tokenizer.decode(text_nearest[i][w_indeces].tolist())
+        for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
+            token2text = model.tokenizer.decode(text_nearest[i][w_indices].tolist())
             proto_texts.append([s_index, token2text, text_train[s_index]])
 
         return proto_texts
 
+    def proto_loss(self, prototype_distances):
+        """
+        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
+        """
+        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
+        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
+
+        # conv assures itself that same tokens are not possible
+        p1_loss = 0
+        # assures that each prototype is not too close to padding token
+        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True, truncation=True)
+        # pad_embedding = model.Bert(**pad_token)[0][0][-1]
+        # p2_loss = torch.sum(torch.cdist(self.prototypes, pad_embedding, p=2))
+        return r1_loss, r2_loss, p1_loss#, p2_loss
 
 class ProtoPNetDist(ProtoPNet):
     def __init__(self, args):
         super(ProtoPNetDist, self).__init__(args)
-
-    def compute_distance(self, embedding):
-        # this approach is not possible, to compute all available combinations it requires lots of memory and computational power
-        combs_batch = []
-        for batch in range(embedding.size(0)):
-            combs_proto = []
-            for proto in range(self.num_prototypes):
-                combs_sentence = []
-                for feature in range(self.enc_size):
-                    combs_sentence.append(torch.combinations(embedding[batch,:,feature], r=self.proto_size))
-                # proto_size x num_combinations x enc_size, where num_combinations is (word per sentence over words per prototype)
-                stacked = torch.stack(combs_sentence).view(self.proto_size,-1,self.enc_size)
-                dist = torch.cdist(stacked, self.protolayer[:,proto,:].unsqueeze(0)) # shape proto_size x num_combinations
-                dist = torch.sum(dist, dim=1).squeeze() # sum along proto_size to get one dist value for the prototype
-                dist = torch.min(dist)[0]
-                combs_proto.append(dist)
-            stacked_proto = torch.stack(combs_proto)
-            combs_batch.append(stacked_proto)
-        distances = torch.stack(combs_batch).view(-1,embedding.size(0),self.proto_size,self.enc_size)
-        return distances
 
     def forward(self, embedding):
         # embedding = self.emb_trafo(embedding)
@@ -238,6 +210,28 @@ class ProtoPNetDist(ProtoPNet):
 
         return proto_texts
 
+    def proto_loss(self, prototype_distances):
+        """
+        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
+        """
+        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
+        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
+
+        if torch.isnan(prototype_distances).any():
+            __import__("pdb").set_trace()
+        # assures that each prototype itself does not consist out of the exact same token multiple times
+        dist = []
+        comb = torch.combinations(torch.arange(self.proto_size), r=2)
+        for k, l in comb:
+            dist.append(torch.mean(torch.abs((self.protolayer[:, k, :] - self.protolayer[:, l, :])),dim=1))
+        # if distance small -> high penalty, check to not divide by 0
+        p1_loss = 1 / torch.mean(torch.stack(dist)) if torch.mean(torch.stack(dist)) else 1000
+        # p1_loss = 0
+        # assures that each prototype is not too close to padding token
+        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True, truncation=True)
+        # pad_embedding = model.Bert(**pad_token)[0][0][-1]
+        # p2_loss = torch.sum(torch.cdist(self.prototypes, pad_embedding, p=2))
+        return r1_loss, r2_loss, p1_loss#, p2_loss
 
 class BaseNet(nn.Module):
     def __init__(self, args):
