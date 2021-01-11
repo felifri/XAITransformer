@@ -20,11 +20,6 @@ except:
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
 
-# Create RTPT object
-rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=200)
-# Start the RTPT tracking
-rtpt.start()
-
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="both", type=str, choices=['train','test','both'],
                     help='What do you want to do? Select either only train, test or both')
@@ -46,7 +41,7 @@ parser.add_argument('-l1','--lambda1', default=0.1, type=float,
                     help='Weight for prototype loss computation')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype loss computation')
-parser.add_argument('-l3','--lambda3', default=1, type=float,
+parser.add_argument('-l3','--lambda3', default=0.1, type=float,
                     help='Weight for padding loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -296,6 +291,11 @@ if __name__ == '__main__':
     np.random.seed(0)
     random.seed(0)
     args = parser.parse_args()
+
+    # Create RTPT object
+    rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=args.num_epochs)
+    # Start the RTPT tracking
+    rtpt.start()
 
     text, labels = load_data(args)
     # split data, and split test set again to get validation and test set

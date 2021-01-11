@@ -171,5 +171,4 @@ def save_embedding(embedding, args, fname, set_name):
     name = fname + '_' + set_name + '.pt'
     os.makedirs(path, exist_ok=True, mode=0o777)
     path = os.path.join(path, name)
-    if not os.path.exists(path):
-        torch.save(embedding, path)
+    torch.save(embedding, path)

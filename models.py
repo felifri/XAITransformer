@@ -77,14 +77,15 @@ class ProtoPNet(nn.Module):
     def compute_embedding(self, x, gpu):
         bs = 1500 # divide data by a batch size if too big to process embedding at once
         word_embedding = []
-        inputs = self.tokenizer(x, return_tensors="pt", truncation=True, padding=True)
+        inputs = self.tokenizer(x, return_tensors="pt", padding=True)
         for i in range(0,len(x),bs):
             inputs_ = inputs.copy()
             inputs_['input_ids'] = inputs_['input_ids'][i:i+bs].to(f'cuda:{gpu}')
             inputs_['attention_mask'] = inputs_['attention_mask'][i:i+bs].to(f'cuda:{gpu}')
-            inputs_['token_type_ids'] = inputs_['token_type_ids'][i:i+bs].to(f'cuda:{gpu}')
-            outputs = self.Bert(**inputs_)
-            word_embedding.extend(outputs[0].cpu())
+            outputs = self.Bert(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
+            # setting embedding values of padding to a high number to make them "unlikely regarded" in distance computation
+            inputs_['attention_mask'][inputs_['attention_mask']==0] = 1e2
+            word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
             # cls_embedding,extend(outputs[1])
         embedding = torch.stack(word_embedding, dim=0)
         return embedding
@@ -132,6 +133,7 @@ class ProtoPNetConv(ProtoPNet):
             # compute padding size such that all dilations yield same sized convs, always round up here
             dil2pad = ceil((kernel_size-1) * (d-1) / 2)
             x2_patch_sum.append(F.conv1d(input=x2, weight=self.ones[:n], padding=dil2pad, dilation=d)[:,:,:cut_off])
+            
         x2_patch_sum = torch.cat(x2_patch_sum,dim=1)
         return x2_patch_sum
 
@@ -142,7 +144,7 @@ class ProtoPNetConv(ProtoPNet):
         for i,n in enumerate(nearest_sent):
             nearest_conv.append(torch.argmin(distances[n,i,:]).cpu().numpy())
 
-        text_tknzd = model.tokenizer(text_train, return_tensors="pt", truncation=True, padding=True).input_ids
+        text_tknzd = model.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
         num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
         num_filters[0] += self.num_protos % len(self.dilated)
         j = 0
@@ -166,11 +168,12 @@ class ProtoPNetConv(ProtoPNet):
         """
         r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-
+        if torch.isnan(prototype_distances).any():
+            __import__("pdb").set_trace()
         # conv assures itself that same tokens are not possible
         p1_loss = 0
         # assures that each prototype is not too close to padding token
-        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True, truncation=True)
+        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True)
         # pad_embedding = model.Bert(**pad_token)[0][0][-1]
         # p2_loss = torch.sum(torch.cdist(self.prototypes, pad_embedding, p=2))
         return r1_loss, r2_loss, p1_loss#, p2_loss
@@ -203,7 +206,7 @@ class ProtoPNetDist(ProtoPNet):
         nearest_word = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
 
         proto_texts = []
-        text_tknzd = model.tokenizer(text_train, return_tensors="pt", truncation=True, padding=True).input_ids
+        text_tknzd = model.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
         for (s_index, w_index) in zip(nearest_sentence, nearest_word):
             token2text = model.tokenizer.decode(text_tknzd[s_index][w_index].tolist())
             proto_texts.append([s_index, token2text, text_train[s_index]])
@@ -217,8 +220,6 @@ class ProtoPNetDist(ProtoPNet):
         r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
         r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
 
-        if torch.isnan(prototype_distances).any():
-            __import__("pdb").set_trace()
         # assures that each prototype itself does not consist out of the exact same token multiple times
         dist = []
         comb = torch.combinations(torch.arange(self.proto_size), r=2)
@@ -226,9 +227,9 @@ class ProtoPNetDist(ProtoPNet):
             dist.append(torch.mean(torch.abs((self.protolayer[:, k, :] - self.protolayer[:, l, :])),dim=1))
         # if distance small -> high penalty, check to not divide by 0
         p1_loss = 1 / torch.mean(torch.stack(dist)) if torch.mean(torch.stack(dist)) else 1000
-        # p1_loss = 0
+
         # assures that each prototype is not too close to padding token
-        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True, truncation=True)
+        # pad_token = model.tokenizer(['test','test sentence for padding', return_tensors="pt", padding=True)
         # pad_embedding = model.Bert(**pad_token)[0][0][-1]
         # p2_loss = torch.sum(torch.cdist(self.prototypes, pad_embedding, p=2))
         return r1_loss, r2_loss, p1_loss#, p2_loss

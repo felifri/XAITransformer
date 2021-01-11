@@ -19,11 +19,6 @@ except:
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
 
-# Create RTPT object
-rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=200)
-# Start the RTPT tracking
-rtpt.start()
-
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('--lr', type=float, default=[0.01,0.001], nargs='+',
                     help='Select learning rate')
@@ -257,6 +252,11 @@ if __name__ == '__main__':
     np.random.seed(0)
     random.seed(0)
     args = parser.parse_args()
+
+    # Create RTPT object
+    rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=args.num_epochs)
+    # Start the RTPT tracking
+    rtpt.start()
 
     text, labels = load_data(args)
     # split data, and split test set again to get validation and test set
