@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 from transformers import BertTokenizer, BertModel
-from math import ceil, floor
+from math import floor
 
 
 class ProtoNet(nn.Module):
@@ -95,11 +95,13 @@ class ProtoPNetConv(ProtoPNet):
         super(ProtoPNetConv, self).__init__(args)
         self.ones = nn.Parameter(torch.ones(args.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
         self.dilated = args.dilated
+        self.num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
+        self.num_filters[0] += self.num_protos % len(self.dilated)
 
     def forward(self, embedding):
         # embedding = self.emb_trafo(embedding)
         distances = self.l2_convolution(embedding)
-        prototype_distances, _ = torch.min(distances, dim=2)
+        prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
 
@@ -107,54 +109,46 @@ class ProtoPNetConv(ProtoPNet):
         # l2-convolution filters on input x
         x2 = x ** 2
         x2 = x2.permute(0,2,1)
-        x2_patch_sum = self.conv_(x2)
 
         protolayer = self.protolayer.view(-1, self.enc_size, self.proto_size)
         p2 = protolayer ** 2
         p2 = torch.sum(p2, dim=(1, 2))
         p2_reshape = p2.view(1, -1, 1)
 
-        x = x.permute(0,2,1)
-        xp = F.conv1d(input=x, weight=protolayer)
-        # L2-distance aka x² - 2xp + p²
-        distances = x2_patch_sum - 2 * xp + p2_reshape
-        distances = torch.sqrt(torch.abs(distances))
+        distances, j = [], 0
+        for d, n in zip(self.dilated, self.num_filters):
+            x2_patch_sum = F.conv1d(input=x2, weight=self.ones[:n], dilation=d)
+            xp = F.conv1d(input=x.permute(0,2,1), weight=protolayer[j:j+n], dilation=d)
+            # L2-distance aka x² - 2xp + p²
+            dist = x2_patch_sum - 2 * xp + p2_reshape[:,j:j+n,:]
+            distances.append(torch.sqrt(torch.abs(dist)))
+            j += n
+
         return distances
 
-    def conv_(self, x2):
-        # compute multiple convolutions for different dilations and prototypes
-        x2_patch_sum = []
-        num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
-        num_filters[0] += self.num_protos % len(self.dilated)
-        kernel_size = self.proto_size
-        # cut off last convolution, if padding too long, even/uneven number problem
-        cut_off = x2.size(-1) - kernel_size + 1
-        for d,n in zip(self.dilated, num_filters):
-            # compute padding size such that all dilations yield same sized convs, always round up here
-            dil2pad = ceil((kernel_size-1) * (d-1) / 2)
-            x2_patch_sum.append(F.conv1d(input=x2, weight=self.ones[:n], padding=dil2pad, dilation=d)[:,:,:cut_off])
-            
-        x2_patch_sum = torch.cat(x2_patch_sum,dim=1)
-        return x2_patch_sum
-
     def nearest_neighbors(self, distances, text_train, model):
-        text_nearest, nearest_conv, nearest_words, proto_texts = [], [], [], []
-        prototype_distances, _ = torch.min(distances, dim=2)
+        argmin_dist, prototype_distances, nearest_conv =  [], [], []
+        # compute min and argmin value in each sentence for each prototype
+        for d in distances:
+            argmin_dist.append(torch.cat([torch.argmin(dist, dim=2) for dist in d], dim=1))
+            prototype_distances.append(torch.cat([torch.min(dist, dim=2)[0] for dist in d], dim=1))
+        prototype_distances = torch.cat(prototype_distances, dim=0)
+        # compute nearest sentence id and look up nearest convolution id in this sentence for each prototype
         nearest_sent = torch.argmin(prototype_distances, dim=0).cpu().numpy()
+        argmin_dist = torch.cat(argmin_dist, dim=0)
         for i,n in enumerate(nearest_sent):
-            nearest_conv.append(torch.argmin(distances[n,i,:]).cpu().numpy())
+            nearest_conv.append(torch.argmin(argmin_dist[n,i]).cpu().numpy())
 
+        # get text for prototypes
+        text_nearest, nearest_words, proto_texts = [], [], []
         text_tknzd = model.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
-        num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
-        num_filters[0] += self.num_protos % len(self.dilated)
         j = 0
-        for i,d in enumerate(self.dilated):
+        for d, n in zip(self.dilated, self.num_filters):
             # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
             # add padding required by convolution
-            nearest_words.extend([[word_id + x*d for x in range(self.proto_size)] for word_id in nearest_conv[j:j+num_filters[i]]])
-            dil2pad = ceil((self.proto_size-1) * (d-1) / 2)
-            text_nearest.extend(F.pad(text_tknzd[nearest_sent[j:j+num_filters[i]]],pad=[dil2pad,dil2pad]))
-            j += num_filters[i]
+            nearest_words.extend([[word_id + x*d for x in range(self.proto_size)] for word_id in nearest_conv[j:j+n]])
+            text_nearest.extend(text_tknzd[nearest_sent[j:j+n]])
+            j += n
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
             token2text = model.tokenizer.decode(text_nearest[i][w_indices].tolist())
