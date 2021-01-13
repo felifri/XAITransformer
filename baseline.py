@@ -7,13 +7,7 @@ import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-
-try:
-    from rtpt.rtpt import RTPT
-except:
-    sys.path.append('../rtpt')
-    from rtpt import RTPT
-
+from rtpt import RTPT
 from models import BaseNet
 from utils import save_embedding, load_embedding, load_data
 

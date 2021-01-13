@@ -152,9 +152,9 @@ def convert_label(labels):
 def load_data(args):
     tag = args.data_name
     texts, labels = [], []
-    if tag=='toxicity':
+    if tag =='toxicity':
         texts, labels = parse_all(tag, args)
-    elif tag=='rt-polarity':
+    elif tag =='rt-polarity':
         texts, labels = get_reviews(args)
     return texts, labels
 

@@ -4,6 +4,9 @@ import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 from transformers import BertTokenizer, BertModel
 from math import floor
+import transformers
+import logging
+from transformers import BertForSequenceClassification
 
 
 class ProtoNet(nn.Module):
@@ -249,3 +252,45 @@ class BaseNet(nn.Module):
     def compute_embedding(self, x, gpu):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=gpu)
         return embedding
+
+
+def _from_pretrained(cls, *args, **kw):
+    """Load a transformers model in PyTorch, with fallback to TF2/Keras weights."""
+    try:
+        return cls.from_pretrained(*args, **kw)
+    except OSError as e:
+        logging.warning("Caught OSError loading model: %s", e)
+        logging.warning(
+            "Re-trying to convert from TensorFlow checkpoint (from_tf=True)")
+        return cls.from_pretrained(*args, from_tf=True, **kw)
+
+
+class BertForSequenceClassification2Layers(BertForSequenceClassification):
+    def __init__(self, config):
+        super().__init__(config)
+        self.classifier = nn.Sequential(
+            nn.Linear(config.hidden_size, 20),
+            nn.Dropout(),
+            nn.ReLU(),
+            nn.Linear(20, config.num_labels, bias=False),
+        )
+
+        self.init_weights()
+
+class BaseNetBERT(nn.Module):
+    def __init__(self):
+        super(BaseNetBERT, self).__init__()
+        self.model_name_or_path = 'bert-large'
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            self.model_name_or_path)
+        model_config = transformers.AutoConfig.from_pretrained(
+            self.model_name_or_path,
+            num_labels=2,
+            output_hidden_states=True,
+            output_attentions=True,
+        )
+        # This is a just a regular PyTorch model.
+        self.model = _from_pretrained(
+            transformers.AutoModelForSequenceClassification,
+            self.model_name_or_path,
+            config=model_config)
