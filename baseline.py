@@ -39,12 +39,16 @@ parser.add_argument('--avoid_spec_token', type=bool, default=False,
                     help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
 parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
+parser.add_argument('--proto_size', type=int, default=4,
+                    help='Define how many words should be used to define a prototype')
+parser.add_argument('--num_prototypes', default=10, type=int,
+                    help='Total number of prototypes')
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
     model = []
-    if args.language_model == 'Bert' or 'GPT2':
+    if args.language_model == ('Bert' or 'GPT2'):
         model = BasePartsNet(args)
-    elif args.model == 'SentBert':
+    elif args.language_model == 'SentBert':
         model = BaseNet(args)
 
     print("Running on gpu {}".format(args.gpu))
@@ -61,6 +65,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_val, args, fname, 'val')
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
 
@@ -129,37 +134,38 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
                     best_acc = acc_val
                     best_model = model.state_dict()
 
-            model.load_state_dict(best_model)
-            model.eval()
+    model.load_state_dict(best_model)
+    model.to(f'cuda:{args.gpu[0]}')
+    model.eval()
 
-            fname = args.language_model
-            if not args.compute_emb:
-                embedding_test = load_embedding(args, fname, 'test')
-            else:
-                embedding_test = model.module.compute_embedding(text_test, args)
-                save_embedding(embedding_test, args, fname, 'test')
-                torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+    fname = args.language_model
+    if not args.compute_emb:
+        embedding_test = load_embedding(args, fname, 'test')
+    else:
+        embedding_test = model.module.compute_embedding(text_test, args)
+        save_embedding(embedding_test, args, fname, 'test')
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
-            all_preds = []
-            all_labels = []
-            losses_per_batch = []
-            test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
-                                                       shuffle=False)#, num_workers=len(args.gpu))
-            with torch.no_grad():
-                for emb_batch, label_batch in test_batches:
-                    emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
-                    predicted_label = model.forward(emb_batch)
-                    loss = ce_crit(predicted_label, label_batch)
+    all_preds = []
+    all_labels = []
+    losses_per_batch = []
+    test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
+                                               shuffle=False)#, num_workers=len(args.gpu))
+    with torch.no_grad():
+        for emb_batch, label_batch in test_batches:
+            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            predicted_label = model.forward(emb_batch)
+            loss = ce_crit(predicted_label, label_batch)
 
-                    losses_per_batch.append(float(loss))
-                    _, predicted = torch.max(predicted_label.data, 1)
-                    all_preds += predicted.cpu().numpy().tolist()
-                    all_labels += label_batch.cpu().numpy().tolist()
+            losses_per_batch.append(float(loss))
+            _, predicted = torch.max(predicted_label.data, 1)
+            all_preds += predicted.cpu().numpy().tolist()
+            all_labels += label_batch.cpu().numpy().tolist()
 
-                loss = np.mean(losses_per_batch)
-                acc_test = balanced_accuracy_score(all_labels, all_preds)
-                print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
+        loss = np.mean(losses_per_batch)
+        acc_test = balanced_accuracy_score(all_labels, all_preds)
+        print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
 if __name__ == '__main__':
     torch.manual_seed(0)

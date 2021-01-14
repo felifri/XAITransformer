@@ -271,6 +271,7 @@ class BasePartsNet(ProtoPNet):
         emb = lin(emb)
         return self.fc(emb)
 
+
 def _from_pretrained(cls, *args, **kw):
     """Load a transformers model in PyTorch, with fallback to TF2/Keras weights."""
     try:
@@ -280,6 +281,7 @@ def _from_pretrained(cls, *args, **kw):
         logging.warning(
             "Re-trying to convert from TensorFlow checkpoint (from_tf=True)")
         return cls.from_pretrained(*args, from_tf=True, **kw)
+
 
 class BertForSequenceClassification2Layers(BertForSequenceClassification):
     def __init__(self, config):

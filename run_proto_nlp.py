@@ -1,7 +1,6 @@
 import argparse
 import datetime
 import glob
-import sys
 import os
 import random
 
@@ -10,12 +9,7 @@ import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-
-try:
-    from rtpt.rtpt import RTPT
-except:
-    sys.path.append('../rtpt')
-    from rtpt import RTPT
+from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
@@ -73,12 +67,12 @@ def train(args, text_train, labels_train, text_val, labels_val):
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     model = []
-    if args.language_model == 'Bert' or 'GPT2':
+    if args.language_model == ('Bert' or 'GPT2'):
         if args.modeltype == 'dist':
             model = ProtoPNetDist(args)
         else:
             model = ProtoPNetConv(args)
-    elif args.model == 'SentBert':
+    elif args.language_model == 'SentBert':
         model = ProtoNet(args)
 
     print("Running on gpu {}".format(args.gpu))
@@ -199,22 +193,24 @@ def train(args, text_train, labels_train, text_val, labels_val):
             }, time_stmp, best=acc_val >= best_acc)
             if acc_val >= best_acc:
                 best_acc = acc_val
+    return os.path.join(save_dir, time_stmp, 'best_model.pth.tar')
 
 
-def test(args, text_train, labels_train, text_test, labels_test):
-    load_path = "./experiments/train_results/*"
-    model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-    model_paths.sort()
-    model_path = model_paths[-1]
+def test(args, text_train, labels_train, text_test, labels_test, model_path):
+    if not model_path:
+        load_path = "./experiments/train_results/*"
+        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        model_paths.sort()
+        model_path = model_paths[-1]
     print("\nStarting evaluation, loading model:", model_path)
 
     model = []
-    if args.language_model == 'Bert' or 'GPT2':
+    if args.language_model == ('Bert' or 'GPT2'):
         if args.modeltype == 'dist':
             model = ProtoPNetDist(args)
         else:
             model = ProtoPNetConv(args)
-    elif args.model == 'SentBert':
+    elif args.language_model == 'SentBert':
         model = ProtoNet(args)
 
     checkpoint = torch.load(model_path)
@@ -320,9 +316,9 @@ if __name__ == '__main__':
         text_train = list(text_train[i] for i in idx)
 
     if args.mode == 'both':
-        train(args, text_train, labels_train, text_val, labels_val)
-        test(args, text_train, labels_train, text_test, labels_test)
+        model_path = train(args, text_train, labels_train, text_val, labels_val)
+        test(args, text_train, labels_train, text_test, labels_test, model_path)
     elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
     elif args.mode == 'test':
-        test(args, text_train, labels_train, text_test, labels_test)
+        test(args, text_train, labels_train, text_test, labels_test, [])
