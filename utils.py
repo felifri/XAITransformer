@@ -46,8 +46,12 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
 ###### load toxicity data ##########################
 ####################################################
 
-def parse_prompts_and_continuation(tag, discrete=True, discard=False):
-    dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
+def parse_prompts_and_continuation(tag, discrete=True, discard=False, file_dir=None):
+    if file_dir is None:
+        dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
+    else:
+        dataset_file = file_dir + "/prompts.jsonl"
+
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
     prompts = pd.json_normalize(dataset['prompt'])
@@ -72,8 +76,12 @@ def parse_prompts_and_continuation(tag, discrete=True, discard=False):
     return x, y
 
 
-def parse_full(tag, discrete=True, discard=False):
-    dataset_file = "./data/realtoxicityprompts/full data.jsonl"
+def parse_full(tag, discrete=True, discard=False, file_dir=None):
+    if file_dir is None:
+        dataset_file = "./data/realtoxicityprompts/full data.jsonl"
+    else:
+        dataset_file = file_dir + "/full data.jsonl"
+
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
     data = [x[0] for x in dataset['generations'].tolist()]
@@ -103,12 +111,12 @@ def parse_full(tag, discrete=True, discard=False):
     return x, y
 
 # get toxicity data, x is text as list of strings, y is list of ints (0,1)
-def parse_all(tag, args):
+def parse_all(tag, args, file_dir=None):
     x, y = [], []
-    x_, y_ = parse_prompts_and_continuation(tag, discard=args.discard)
+    x_, y_ = parse_prompts_and_continuation(tag, discard=args.discard, file_dir=file_dir)
     x += x_
     y += y_
-    x_, y_ = parse_full(tag, discard=args.discard)
+    x_, y_ = parse_full(tag, discard=args.discard, file_dir=file_dir)
     x += x_
     y += y_
     return x, y
@@ -149,11 +157,13 @@ def convert_label(labels):
 ###### main loading function #######################
 ####################################################
 
-def load_data(args):
+def load_data(args, file_dir=None):
     tag = args.data_name
     texts, labels = [], []
     if tag =='toxicity':
-        texts, labels = parse_all(tag, args)
+        texts, labels = parse_all(tag, args, file_dir)
+    elif tag =='toxicity_full':
+        texts, labels = parse_full('toxicity', discard=args.discard, file_dir=file_dir)
     elif tag =='rt-polarity':
         texts, labels = get_reviews(args)
     return texts, labels
