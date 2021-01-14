@@ -224,7 +224,7 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         embedding_train = load_embedding(args, fname, 'train')
         embedding_test = load_embedding(args, fname, 'test')
     else:
-        embedding_train = model.module.compute_embedding(text_train, args)
+        embedding_train = model.compute_embedding(text_train, args)
         embedding_test = model.compute_embedding(text_test, args)
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_test, args, fname, 'test')
@@ -294,6 +294,7 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object

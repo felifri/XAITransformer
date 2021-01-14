@@ -33,7 +33,7 @@ parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
-parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
+parser.add_argument('--language_model', type=str, default='SentBert', choices=['Bert','SentBert','GPT2'],
                     help='Define which language model to use')
 parser.add_argument('--avoid_spec_token', type=bool, default=False,
                     help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
@@ -171,6 +171,7 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object
