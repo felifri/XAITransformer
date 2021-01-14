@@ -1,5 +1,4 @@
 import argparse
-import sys
 import random
 
 import torch
@@ -8,7 +7,7 @@ from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from rtpt import RTPT
-from models import BaseNet
+from models import BaseNet, BasePartsNet
 from utils import save_embedding, load_embedding, load_data
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
@@ -23,10 +22,10 @@ parser.add_argument('--val_epoch', default=10, type=int,
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
-                    help='Select data name')
+                    help='Select name of data set')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
-parser.add_argument('--class_weights', default=[0.5,0.5],
+parser.add_argument('--class_weights', default=[1,1],
                     help='Class weight for cross entropy loss')
 parser.add_argument('-g','--gpu', type=int, default=0, nargs='+',
                     help='GPU device number(s)')
@@ -34,20 +33,35 @@ parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
+parser.add_argument('--language_model', type=str, default='SentBert', choices=['Bert','SentBert','GPT2'],
+                    help='Define which language model to use')
+parser.add_argument('--avoid_spec_token', type=bool, default=False,
+                    help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
+parser.add_argument('--compute_emb', type=bool, default=False,
+                    help='Whether to recompute (True) the embedding or just load it (False)')
+parser.add_argument('--proto_size', type=int, default=4,
+                    help='Define how many words should be used to define a prototype')
+parser.add_argument('--num_prototypes', default=10, type=int,
+                    help='Total number of prototypes')
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
-    model = BaseNet(args)
+    model = []
+    if args.language_model == ('Bert' or 'GPT2'):
+        model = BasePartsNet(args)
+    elif args.language_model == 'SentBert':
+        model = BaseNet(args)
+
     print("Running on gpu {}".format(args.gpu))
     model = torch.nn.DataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
 
-    fname = 'SentBert'
-    try:
+    fname = args.language_model
+    if not args.compute_emb:
         embedding_train = load_embedding(args, fname, 'train')
         embedding_val = load_embedding(args, fname, 'val')
-    except:
-        embedding_train = model.module.compute_embedding(text_train, args.gpu[0])
-        embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+    else:
+        embedding_train = model.module.compute_embedding(text_train, args)
+        embedding_val = model.module.compute_embedding(text_val, args)
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_val, args, fname, 'val')
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
@@ -87,7 +101,6 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
             losses_per_batch.append(float(loss))
 
         mean_loss = np.mean(losses_per_batch)
-
         acc = balanced_accuracy_score(all_labels, all_preds)
         print("Epoch {}, mean loss {:.4f}, train acc {:.4f}".format(epoch+1,
                                                         mean_loss,
@@ -121,45 +134,44 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
                     best_acc = acc_val
                     best_model = model.state_dict()
 
-            model.load_state_dict(best_model)
-            model.to(f'cuda:{args.gpu[0]}')
-            model.eval()
-            fname = 'SentBert'
-            try:
-                embedding_train = load_embedding(args, fname, 'train')
-                embedding_test = load_embedding(args, fname, 'test')
-            except:
-                embedding_train = model.compute_embedding(text_train, args.gpu[0])
-                embedding_test = model.compute_embedding(text_test, args.gpu[0])
-                save_embedding(embedding_train, args, fname, 'train')
-                save_embedding(embedding_test, args, fname, 'test')
-                torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+    model.load_state_dict(best_model)
+    model.to(f'cuda:{args.gpu[0]}')
+    model.eval()
 
-            all_preds = []
-            all_labels = []
-            losses_per_batch = []
-            test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
-                                                       shuffle=False)#, num_workers=len(args.gpu))
-            with torch.no_grad():
-                for emb_batch, label_batch in test_batches:
-                    emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
-                    predicted_label = model.forward(emb_batch)
-                    loss = ce_crit(predicted_label, label_batch)
+    fname = args.language_model
+    if not args.compute_emb:
+        embedding_test = load_embedding(args, fname, 'test')
+    else:
+        embedding_test = model.module.compute_embedding(text_test, args)
+        save_embedding(embedding_test, args, fname, 'test')
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
-                    losses_per_batch.append(float(loss))
-                    _, predicted = torch.max(predicted_label.data, 1)
-                    all_preds += predicted.cpu().numpy().tolist()
-                    all_labels += label_batch.cpu().numpy().tolist()
+    all_preds = []
+    all_labels = []
+    losses_per_batch = []
+    test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
+                                               shuffle=False)#, num_workers=len(args.gpu))
+    with torch.no_grad():
+        for emb_batch, label_batch in test_batches:
+            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            predicted_label = model.forward(emb_batch)
+            loss = ce_crit(predicted_label, label_batch)
 
-                loss = np.mean(losses_per_batch)
-                acc_test = balanced_accuracy_score(all_labels, all_preds)
-                print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
+            losses_per_batch.append(float(loss))
+            _, predicted = torch.max(predicted_label.data, 1)
+            all_preds += predicted.cpu().numpy().tolist()
+            all_labels += label_batch.cpu().numpy().tolist()
+
+        loss = np.mean(losses_per_batch)
+        acc_test = balanced_accuracy_score(all_labels, all_preds)
+        print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
 if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object

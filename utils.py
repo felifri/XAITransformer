@@ -160,11 +160,11 @@ def convert_label(labels):
 def load_data(args, file_dir=None):
     tag = args.data_name
     texts, labels = [], []
-    if tag =='toxicity':
+    if tag == 'toxicity':
         texts, labels = parse_all(tag, args, file_dir)
-    elif tag =='toxicity_full':
+    elif tag == 'toxicity_full':
         texts, labels = parse_full('toxicity', discard=args.discard, file_dir=file_dir)
-    elif tag =='rt-polarity':
+    elif tag == 'rt-polarity':
         texts, labels = get_reviews(args)
     return texts, labels
 

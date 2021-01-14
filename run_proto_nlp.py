@@ -1,7 +1,6 @@
 import argparse
 import datetime
 import glob
-import sys
 import os
 import random
 
@@ -10,12 +9,7 @@ import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-
-try:
-    from rtpt.rtpt import RTPT
-except:
-    sys.path.append('../rtpt')
-    from rtpt import RTPT
+from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
@@ -34,18 +28,18 @@ parser.add_argument('--val_epoch', default=10, type=int,
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
-                    help='Select data name')
+                    help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
 parser.add_argument('-l1','--lambda1', default=0.1, type=float,
                     help='Weight for prototype loss computation')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype loss computation')
-parser.add_argument('-l3','--lambda3', default=0.1, type=float,
+parser.add_argument('-l3','--lambda3', default=0.5, type=float,
                     help='Weight for padding loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
-parser.add_argument('--class_weights', default=[0.5,0.5],
+parser.add_argument('--class_weights', default=[1,1],
                     help='Class weight for cross entropy loss')
 parser.add_argument('-g','--gpu', type=int, default=0, nargs='+',
                     help='GPU device number(s)')
@@ -57,21 +51,28 @@ parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
 parser.add_argument('--proto_size', type=int, default=4,
                     help='Define how many words should be used to define a prototype')
-parser.add_argument('--model', type=str, default='dist', choices=['p_conv','p_dist','dist'],
-                    help='Define which model to use')
-parser.add_argument('--dilated', type=int, default=[3,4,5,6], nargs='+',
+parser.add_argument('--modeltype', type=str, default='dist', choices=['conv','dist'],
+                    help='Define which similarity computation to use')
+parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
+                    help='Define which language model to use')
+parser.add_argument('--dilated', type=int, default=[1,3,5], nargs='+',
                     help='Whether to use dilation in the convolution ProtoP and if with which step size')
+parser.add_argument('--avoid_spec_token', type=bool, default=False,
+                    help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
+parser.add_argument('--compute_emb', type=bool, default=False,
+                    help='Whether to recompute (True) the embedding or just load it (False)')
 
 def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     model = []
-    if args.model == 'p_dist':
-        model = ProtoPNetDist(args)
-    elif args.model == 'p_conv':
-        model = ProtoPNetConv(args)
-    elif args.model == 'dist':
+    if args.language_model == ('Bert' or 'GPT2'):
+        if args.modeltype == 'dist':
+            model = ProtoPNetDist(args)
+        else:
+            model = ProtoPNetConv(args)
+    elif args.language_model == 'SentBert':
         model = ProtoNet(args)
 
     print("Running on gpu {}".format(args.gpu))
@@ -79,17 +80,16 @@ def train(args, text_train, labels_train, text_val, labels_val):
     # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
 
-    fname = 'Bert' if args.model.startswith('p') else 'SentBert'
-    try:
+    fname = args.language_model
+    if not args.compute_emb:
         embedding_train = load_embedding(args, fname, 'train')
         embedding_val = load_embedding(args, fname, 'val')
-    except:
-        embedding_train = model.module.compute_embedding(text_train, args.gpu[0])
-        embedding_val = model.module.compute_embedding(text_val, args.gpu[0])
+    else:
+        embedding_train = model.module.compute_embedding(text_train, args)
+        embedding_val = model.module.compute_embedding(text_val, args)
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_val, args, fname, 'val')
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
 
@@ -193,21 +193,24 @@ def train(args, text_train, labels_train, text_val, labels_val):
             }, time_stmp, best=acc_val >= best_acc)
             if acc_val >= best_acc:
                 best_acc = acc_val
+    return os.path.join(save_dir, time_stmp, 'best_model.pth.tar')
 
 
-def test(args, text_train, labels_train, text_test, labels_test):
-    load_path = "./experiments/train_results/*"
-    model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-    model_paths.sort()
-    model_path = model_paths[-1]
+def test(args, text_train, labels_train, text_test, labels_test, model_path):
+    if not model_path:
+        load_path = "./experiments/train_results/*"
+        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        model_paths.sort()
+        model_path = model_paths[-1]
     print("\nStarting evaluation, loading model:", model_path)
 
     model = []
-    if args.model=='p_dist':
-        model = ProtoPNetDist(args)
-    elif args.model=='p_conv':
-        model = ProtoPNetConv(args)
-    elif args.model=='dist':
+    if args.language_model == ('Bert' or 'GPT2'):
+        if args.modeltype == 'dist':
+            model = ProtoPNetDist(args)
+        else:
+            model = ProtoPNetConv(args)
+    elif args.language_model == 'SentBert':
         model = ProtoNet(args)
 
     checkpoint = torch.load(model_path)
@@ -216,13 +219,13 @@ def test(args, text_train, labels_train, text_test, labels_test):
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
-    fname = 'Bert' if args.model.startswith('p') else 'SentBert'
-    try:
+    fname = args.language_model
+    if not args.compute_emb:
         embedding_train = load_embedding(args, fname, 'train')
         embedding_test = load_embedding(args, fname, 'test')
-    except:
-        embedding_train = model.compute_embedding(text_train, args.gpu[0])
-        embedding_test = model.compute_embedding(text_test, args.gpu[0])
+    else:
+        embedding_train = model.compute_embedding(text_train, args)
+        embedding_test = model.compute_embedding(text_test, args)
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_test, args, fname, 'test')
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
@@ -257,26 +260,27 @@ def test(args, text_train, labels_train, text_test, labels_test):
 
         train_batches = torch.utils.data.DataLoader(embedding_train, batch_size=args.batch_size,
                                               shuffle=False)#, num_workers=len(args.gpu))
-        dist=[]
+        dist = []
         for batch in train_batches:
             batch = batch.to(f'cuda:{args.gpu[0]}')
             _, distances, _ = model.forward(batch)
             dist.append(distances)
-        dist = torch.cat(dist)
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_texts = model.nearest_neighbors(dist, text_train, model)
+        proto_texts = model.nearest_neighbors(dist, text_train, labels_train, model)
 
         weights = model.get_proto_weights()
         save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
         #os.makedirs(os.path.dirname(save_path), exist_ok=True)
         txt_file = open(save_path, "w+")
+        for arg in vars(args):
+            txt_file.write(f"{arg}: {vars(args)[arg]}" + "\n")
+        txt_file.write(f"test loss: {loss:.4f}" + "\n")
+        txt_file.write(f"test acc: {100*acc_test:.2f}" + "\n")
         for line in proto_texts:
-            txt_file.write(str(line))
-            txt_file.write("\n")
+            txt_file.write(str(line) + "\n")
         for line in weights:
-            txt_file.write(str(line))
-            txt_file.write("\n")
+            txt_file.write(str(line) + "\n")
         txt_file.close()
 
         # get prototypes
@@ -290,6 +294,7 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object
@@ -312,9 +317,9 @@ if __name__ == '__main__':
         text_train = list(text_train[i] for i in idx)
 
     if args.mode == 'both':
-        train(args, text_train, labels_train, text_val, labels_val)
-        test(args, text_train, labels_train, text_test, labels_test)
+        model_path = train(args, text_train, labels_train, text_val, labels_val)
+        test(args, text_train, labels_train, text_test, labels_test, model_path)
     elif args.mode == 'train':
         train(args, text_train, labels_train, text_val, labels_val)
     elif args.mode == 'test':
-        test(args, text_train, labels_train, text_test, labels_test)
+        test(args, text_train, labels_train, text_test, labels_test, [])
