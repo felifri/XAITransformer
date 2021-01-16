@@ -28,7 +28,7 @@ parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
-parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
                     help='Select data name')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -169,7 +169,9 @@ if __name__ == '__main__':
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.8, stratify=labels,
                                                                         random_state=42)
-    _, text_test, _, labels_test = train_test_split(text_test, labels_test, test_size=0.1, stratify=labels_test,
+    _, text_test, _, labels_test = train_test_split(text_test, labels_test,
+                                                    test_size=0.1,
+                                                    stratify=labels_test,
                                                     random_state=42)
 
     # set class weights for balanced cross entropy computation
