@@ -99,7 +99,7 @@ class ProtoPNet(nn.Module):
         return self.protolayer
 
     def compute_embedding(self, x, args):
-        bs = 100 # divide data by a batch size if too big for memory to process embedding at once
+        bs = 10 # divide data by a batch size if too big for memory to process embedding at once
         word_embedding = []
         inputs = self.tokenizer(x, return_tensors="pt", padding=True)
         for i in range(0,len(x),bs):
@@ -127,6 +127,8 @@ class ProtoPNetConv(ProtoPNet):
         self.dilated = args.dilated
         self.num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
         self.num_filters[0] += self.num_protos % len(self.dilated)
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
+                                       requires_grad=True)
 
     def forward(self, embedding):
         # embedding = self.emb_trafo(embedding)
@@ -137,21 +139,19 @@ class ProtoPNetConv(ProtoPNet):
 
     def l2_convolution(self, x):
         # l2-convolution filters on input x
+        x = x.permute(0,2,1)
         x2 = x ** 2
-        x2 = x2.permute(0,2,1)
 
-        protolayer = self.protolayer.view(-1, self.enc_size, self.proto_size)
-        p2 = protolayer ** 2
-        p2 = torch.sum(p2, dim=(1, 2))
-        p2_reshape = p2.view(1, -1, 1)
+        p2 = self.protolayer ** 2
+        p2_sum = torch.sum(p2, dim=(1, 2)).view(-1,1)
 
         distances, j = [], 0
         for d, n in zip(self.dilated, self.num_filters):
             x2_patch_sum = F.conv1d(input=x2, weight=self.ones[:n], dilation=d)
-            xp = F.conv1d(input=x.permute(0,2,1), weight=protolayer[j:j+n], dilation=d)
-            # L2-distance aka x² - 2xp + p²
-            dist = x2_patch_sum - 2 * xp + p2_reshape[:,j:j+n,:]
-            distances.append(torch.sqrt(torch.abs(dist)))
+            xp = F.conv1d(input=x, weight=self.protolayer[j:j+n], dilation=d)
+            # L2-distance aka sqrt(x² - 2xp + p²)
+            dist = torch.sqrt(torch.abs(x2_patch_sum - 2 * xp + p2_sum[j:j+n]))
+            distances.append(dist)
             j += n
 
         return distances
@@ -207,8 +207,7 @@ class ProtoPNetDist(ProtoPNet):
         distances = torch.cdist(embedding.unsqueeze(1), self.protolayer, p=2)
         # pool along words per sentence, to get only #proto_size smallest distances per sentence and prototype
         # and compute sum along this #proto_size to get only one distance value per sentence and prototype
-        min_distances = -F.max_pool2d(-distances,
-                                      kernel_size=(distances.size(2), 1))
+        min_distances = -F.max_pool2d(-distances, kernel_size=(distances.size(2), 1))
         prototype_distances = torch.sum(torch.abs(min_distances), dim=-1).squeeze()
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
@@ -248,7 +247,8 @@ class ProtoPNetDist(ProtoPNet):
             for k, l in comb:
                 dist.append(torch.mean(torch.abs((self.protolayer[:, k, :] - self.protolayer[:, l, :])),dim=1))
             # if distance small -> high penalty, check to not divide by 0
-            p1_loss = 1 / torch.mean(torch.stack(dist)) if torch.mean(torch.stack(dist)) else 1000
+            _mean = torch.mean(torch.stack(dist))
+            p1_loss = 1 / _mean if _mean else 1000
         else:
             p1_loss = 0
         return r1_loss, r2_loss, p1_loss

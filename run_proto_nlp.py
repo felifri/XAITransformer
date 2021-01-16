@@ -8,6 +8,7 @@ import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
+# from transformers import get_linear_schedule_with_warmup
 from tqdm import tqdm
 from rtpt import RTPT
 
@@ -21,7 +22,7 @@ parser.add_argument('--lr', type=float, default=0.001,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=256, type=int,
+parser.add_argument('-bs', '--batch_size', default=650, type=int,
                     help='Select batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
@@ -39,9 +40,9 @@ parser.add_argument('-l3','--lambda3', default=0.5, type=float,
                     help='Weight for padding loss computation')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
-parser.add_argument('--class_weights', default=[1,1],
+parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=0, nargs='+',
+parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
@@ -64,10 +65,10 @@ parser.add_argument('--compute_emb', type=bool, default=False,
 
 def train(args, text_train, labels_train, text_val, labels_val):
     save_dir = "./experiments/train_results/"
-    time_stmp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    time_stmp = datetime.datetime.now().strftime(f"%m-%d %H:%M_{args.modeltype}{args.proto_size}")
 
     model = []
-    if args.language_model == ('Bert' or 'GPT2'):
+    if args.language_model == 'Bert' or args.language_model == 'GPT2':
         if args.modeltype == 'dist':
             model = ProtoPNetDist(args)
         else:
@@ -75,7 +76,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
     elif args.language_model == 'SentBert':
         model = ProtoNet(args)
 
-    print("Running on gpu {}".format(args.gpu))
+    print(f"Running on gpu {args.gpu}")
     model = torch.nn.DataParallel(model, device_ids=args.gpu)
     # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
@@ -90,13 +91,19 @@ def train(args, text_train, labels_train, text_val, labels_val):
         save_embedding(embedding_train, args, fname, 'train')
         save_embedding(embedding_val, args, fname, 'val')
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
+    num_epochs = args.num_epochs
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().cuda(args.gpu[0]))
+    # scheduler = get_linear_schedule_with_warmup(optimizer, num_epochs // 10, num_epochs)
+    ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
     model.train()
-    num_epochs = args.num_epochs
-    print("\nStarting training for {} epochs\n".format(num_epochs))
+    print(f"\nStarting training for {num_epochs} epochs\n")
     best_acc = 0
+    train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
+                                                shuffle=True, pin_memory=True, num_workers=0)#, drop_last=True)
+    val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
+                                              shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     for epoch in tqdm(range(num_epochs)):
         all_preds = []
         all_labels = []
@@ -105,14 +112,13 @@ def train(args, text_train, labels_train, text_val, labels_val):
         r1_loss_per_batch = []
         r2_loss_per_batch = []
         p1_loss_per_batch = []
-        train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
-                                                  shuffle=True)#, drop_last=True, num_workers=len(args.gpu))
+
         # Update the RTPT
-        rtpt.step(subtitle=f"epoch={epoch+1}")
+        rtpt.step()
 
         for emb_batch, label_batch in train_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
 
             optimizer.zero_grad()
             prototype_distances, _, predicted_label = model.forward(emb_batch)
@@ -138,32 +144,25 @@ def train(args, text_train, labels_train, text_val, labels_val):
             r2_loss_per_batch.append(float(r2_loss))
             p1_loss_per_batch.append(float(p1_loss))
 
+        # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         r1_mean_loss = np.mean(r1_loss_per_batch)
         r2_mean_loss = np.mean(r2_loss_per_batch)
         p1_mean_loss = np.mean(p1_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
-        print("Epoch {}, losses: mean {:.4f}, ce {:.4f}, r1 {:.4f}, "
-              "r2 {:.4f}, p1 {:.4f}, train acc {:.4f}".format(epoch+1,
-                                                        mean_loss,
-                                                        ce_mean_loss,
-                                                        r1_mean_loss,
-                                                        r2_mean_loss,
-                                                        p1_mean_loss,
-                                                        100 * acc))
+        print(f"Epoch {epoch+1}, losses: mean {mean_loss:.4f}, ce {ce_mean_loss:.4f}, r1 {r1_mean_loss:.4f}, "
+              f"r2 {r2_mean_loss:.4f}, p1 {p1_mean_loss:.4f}, train acc {100 * acc:.4f}")
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
             all_preds = []
             all_labels = []
             losses_per_batch = []
-            val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
-                                                      shuffle=False)#, drop_last=True, num_workers=len(args.gpu))
             with torch.no_grad():
                 for emb_batch, label_batch in val_batches:
                     emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+                    label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
                     prototype_distances, _, predicted_label = model.forward(emb_batch)
 
                     # compute individual losses and backward step
@@ -182,7 +181,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
                 loss_val = np.mean(losses_per_batch)
 
                 acc_val = balanced_accuracy_score(all_labels, all_preds)
-                print("Validation: mean loss {:.4f}, acc_val {:.4f}".format(loss_val, 100 * acc_val))
+                print(f"Validation: mean loss {loss_val:.4f}, acc_val {100 * acc_val:.4f}")
 
             save_checkpoint(save_dir, {
                 'epoch': epoch + 1,
@@ -205,7 +204,7 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
     print("\nStarting evaluation, loading model:", model_path)
 
     model = []
-    if args.language_model == ('Bert' or 'GPT2'):
+    if args.language_model == 'Bert' or args.language_model == 'GPT2':
         if args.modeltype == 'dist':
             model = ProtoPNetDist(args)
         else:
@@ -234,11 +233,11 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
     all_labels = []
     losses_per_batch = []
     test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
-                                               shuffle=False)#, num_workers=len(args.gpu))
+                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     with torch.no_grad():
         for emb_batch, label_batch in test_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
             prototype_distances, _, predicted_label = model.forward(emb_batch)
 
             # compute individual losses and backward step
@@ -259,7 +258,7 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
 
         train_batches = torch.utils.data.DataLoader(embedding_train, batch_size=args.batch_size,
-                                              shuffle=False)#, num_workers=len(args.gpu))
+                                              shuffle=False, pin_memory=False, num_workers=0)#, drop_last=True)
         dist = []
         for batch in train_batches:
             batch = batch.to(f'cuda:{args.gpu[0]}')
@@ -274,9 +273,9 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         #os.makedirs(os.path.dirname(save_path), exist_ok=True)
         txt_file = open(save_path, "w+")
         for arg in vars(args):
-            txt_file.write(f"{arg}: {vars(args)[arg]}" + "\n")
-        txt_file.write(f"test loss: {loss:.4f}" + "\n")
-        txt_file.write(f"test acc: {100*acc_test:.2f}" + "\n")
+            txt_file.write(f"{arg}: {vars(args)[arg]}\n")
+        txt_file.write(f"test loss: {loss:.4f}\n")
+        txt_file.write(f"test acc: {100*acc_test:.2f}\n")
         for line in proto_texts:
             txt_file.write(str(line) + "\n")
         for line in weights:
@@ -286,15 +285,16 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         # get prototypes
         prototypes = model.get_protos().cpu().numpy()
         embedding_train = embedding_train.cpu().numpy()
-        visualize_protos(embedding_train, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
-        # visualize_protos(embedding_train, labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+        if len(embedding_train.size()) == 2:
+            visualize_protos(embedding_train, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+            # visualize_protos(embedding_train, labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
 if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
-    torch.set_num_threads(6)
+    torch.set_num_threads(8)
     args = parser.parse_args()
 
     # Create RTPT object

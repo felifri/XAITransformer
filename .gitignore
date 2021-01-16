@@ -8,3 +8,4 @@ experiments/train_results/
 experiments/
 .idea
 abandoned.py
+training_schedule.*
