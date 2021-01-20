@@ -33,6 +33,8 @@ class ProtoNet(nn.Module):
 
     def compute_embedding(self, x, args):
         embedding = self.sentBert.encode(x, convert_to_tensor=True, device=args.gpu[0])
+        if len(embedding.size()) == 1:
+            embedding.unsqueeze_(0)
         return embedding
 
     @staticmethod
@@ -167,11 +169,11 @@ class ProtoPNetConv(ProtoPNet):
         nearest_sent = torch.argmin(prototype_distances, dim=0).cpu().numpy()
         argmin_dist = torch.cat(argmin_dist, dim=0)
         for i,n in enumerate(nearest_sent):
-            nearest_conv.append(torch.argmin(argmin_dist[n,i]).cpu().numpy())
+            nearest_conv.append(argmin_dist[n,i].cpu().numpy())
 
         # get text for prototypes
         text_nearest, nearest_words, proto_texts = [], [], []
-        text_tknzd = model.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
+        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
         j = 0
         for d, n in zip(self.dilated, self.num_filters):
             # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
@@ -181,7 +183,7 @@ class ProtoPNetConv(ProtoPNet):
             j += n
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
-            token2text = model.tokenizer.decode(text_nearest[i][w_indices].tolist())
+            token2text = self.tokenizer.decode(text_nearest[i][w_indices].tolist())
             proto_texts.append([f"sentence {s_index}", f"label {labels_train[s_index]}", token2text, text_train[s_index]])
 
         return proto_texts
@@ -212,8 +214,7 @@ class ProtoPNetDist(ProtoPNet):
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
 
-    @staticmethod
-    def nearest_neighbors(distances, text_train, labels_train, model):
+    def nearest_neighbors(self, distances, text_train, labels_train, model):
         distances = torch.cat(distances)
         min_distances_per_sentence = -F.max_pool2d(-distances,
                                       kernel_size=(distances.size(2),1))
@@ -226,9 +227,9 @@ class ProtoPNetDist(ProtoPNet):
         nearest_word = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
 
         proto_texts = []
-        text_tknzd = model.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
+        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
         for (s_index, w_index) in zip(nearest_sentence, nearest_word):
-            token2text = model.tokenizer.decode(text_tknzd[s_index][w_index].tolist())
+            token2text = self.tokenizer.decode(text_tknzd[s_index][w_index].tolist())
             proto_texts.append([f"sentence {s_index}", f"label {labels_train[s_index]}", token2text, text_train[s_index]])
 
         return proto_texts

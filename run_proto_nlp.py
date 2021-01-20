@@ -69,11 +69,6 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
     save_dir = "./experiments/train_results/"
     time_stmp = datetime.datetime.now().strftime(f"%m-%d %H:%M_{args.num_prototypes}{args.modeltype}{args.proto_size}")
 
-    print(f"Running on gpu {args.gpu}")
-    model = torch.nn.DataParallel(model, device_ids=args.gpu)
-    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
-    model.to(f'cuda:{args.gpu[0]}')
-
     num_epochs = args.num_epochs
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     # scheduler = get_linear_schedule_with_warmup(optimizer, num_epochs // 10, num_epochs)
@@ -166,7 +161,7 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
 
             save_checkpoint(save_dir, {
                 'epoch': epoch + 1,
-                'state_dict': model.module.state_dict(),
+                'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'hyper_params': args,
                 'acc_val': acc_val,
@@ -186,7 +181,6 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
 
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
-    model.to(f'cuda:{args.gpu[0]}')
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
@@ -203,7 +197,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            r1_loss, r2_loss, p1_loss = model.proto_loss(prototype_distances)
+            r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
             loss = ce_loss + \
                    args.lambda1 * r1_loss + \
                    args.lambda2 * r2_loss + \
@@ -227,9 +221,9 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
             dist.append(distances)
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_texts = model.nearest_neighbors(dist, text_train, labels_train, model)
+        proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train, model)
 
-        weights = model.get_proto_weights()
+        weights = model.module.get_proto_weights()
         save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
         txt_file = open(save_path, "w+")
         for arg in vars(args):
@@ -243,7 +237,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
         txt_file.close()
 
         # get prototypes
-        prototypes = model.get_protos().cpu().numpy()
+        prototypes = model.module.get_protos().cpu().numpy()
         embedding_train = embedding_train.cpu().numpy()
         if len(embedding_train.shape) == 2:
             visualize_protos(embedding_train, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
@@ -260,12 +254,10 @@ def query(args, embedding_train, labels_train, text_train, model, model_path):
 
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
-    model.to(f'cuda:{args.gpu[0]}')
     model.eval()
 
-    embedding_query = model.compute_embedding(args.query, args)
+    embedding_query = model.module.compute_embedding(args.query, args)
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
-    __import__("pdb").set_trace()
     train_batches = torch.utils.data.DataLoader(embedding_train, batch_size=args.batch_size,
                                                 shuffle=False, pin_memory=False, num_workers=0)  # , drop_last=True)
     dist = []
@@ -276,14 +268,14 @@ def query(args, embedding_train, labels_train, text_train, model, model_path):
             dist.append(distances)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_texts = model.nearest_neighbors(dist, text_train, labels_train, model)
+    proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train, model)
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
 
     predicted = torch.argmax(predicted_label).cpu()
 
     query2proto = torch.argmin(distances)
     nearest_proto = proto_texts[query2proto]
-    weights = model.get_proto_weights()
+    weights = model.module.get_proto_weights()
 
     save_path = os.path.join(os.path.dirname(model_path), "query.txt")
     txt_file = open(save_path, "w+")
@@ -334,6 +326,11 @@ if __name__ == '__main__':
             model = ProtoPNetConv(args)
     elif fname == 'SentBert':
         model = ProtoNet(args)
+
+    print(f"Running on gpu {args.gpu}")
+    model = torch.nn.DataParallel(model, device_ids=args.gpu)
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
+    model.to(f'cuda:{args.gpu[0]}')
 
     avoid = ''
     if args.avoid_spec_token:
