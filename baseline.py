@@ -46,7 +46,7 @@ parser.add_argument('--num_prototypes', default=10, type=int,
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
     model = []
-    if args.language_model == ('Bert' or 'GPT2'):
+    if args.language_model == 'Bert' or args.language_model == 'GPT2':
         model = BasePartsNet(args)
     elif args.language_model == 'SentBert':
         model = BaseNet(args)
@@ -73,18 +73,20 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
     num_epochs = args.num_epochs
     print("\nStarting training for {} epochs\n".format(num_epochs))
     best_acc = 0
+    train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
+                                                shuffle=True)  # , drop_last=True, num_workers=len(args.gpu))
+    val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
+                                              shuffle=False)  # , drop_last=True, num_workers=len(args.gpu))
     for epoch in tqdm(range(num_epochs)):
         all_preds = []
         all_labels = []
         losses_per_batch = []
-        train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
-                                                  shuffle=True)#, drop_last=True, num_workers=len(args.gpu))
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch+1}")
 
         for emb_batch, label_batch in train_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
 
             optimizer.zero_grad()
             predicted_label = model.forward(emb_batch)
@@ -111,12 +113,10 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
             all_preds = []
             all_labels = []
             losses_per_batch = []
-            val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
-                                                      shuffle=False)#, drop_last=True, num_workers=len(args.gpu))
             with torch.no_grad():
                 for emb_batch, label_batch in val_batches:
                     emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-                    label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+                    label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
                     predicted_label = model.forward(emb_batch)
 
                     # compute individual losses and backward step
@@ -154,7 +154,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
     with torch.no_grad():
         for emb_batch, label_batch in test_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            label_batch = torch.LongTensor(label_batch).to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
             predicted_label = model.forward(emb_batch)
             loss = ce_crit(predicted_label, label_batch)
 

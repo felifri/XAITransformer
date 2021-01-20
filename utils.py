@@ -174,7 +174,7 @@ def load_data(args, file_dir=None):
 def load_embedding(args, fname, set_name):
     path = os.path.join('data/embedding', args.data_name, fname+'_'+set_name+'.pt')
     assert os.path.isfile(path)
-    return torch.load(path)
+    return torch.load(path, map_location=torch.device('cpu'))
 
 def save_embedding(embedding, args, fname, set_name):
     path = os.path.join('data/embedding', args.data_name)

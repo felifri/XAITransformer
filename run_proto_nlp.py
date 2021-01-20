@@ -16,7 +16,7 @@ from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
 from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('-m', '--mode', default="both", type=str, choices=['train','test','both'],
+parser.add_argument('-m', '--mode', default="all", type=str, choices=['train','test','query','all'],
                     help='What do you want to do? Select either only train, test or both')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='Select learning rate')
@@ -28,7 +28,7 @@ parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data/rt-polarity',
                     help='Select data path')
-parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -56,41 +56,23 @@ parser.add_argument('--modeltype', type=str, default='dist', choices=['conv','di
                     help='Define which similarity computation to use')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
                     help='Define which language model to use')
-parser.add_argument('--dilated', type=int, default=[1,3,5], nargs='+',
+parser.add_argument('--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the convolution ProtoP and if with which step size')
 parser.add_argument('--avoid_spec_token', type=bool, default=False,
                     help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
 parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
+parser.add_argument('--query', type=str, default='this is a very interesting movie', nargs='+',
+                    help='Type your query to test the model and get classification explanation')
 
-def train(args, text_train, labels_train, text_val, labels_val):
+def train(args, embedding_train, labels_train, embedding_val, labels_val, model):
     save_dir = "./experiments/train_results/"
-    time_stmp = datetime.datetime.now().strftime(f"%m-%d %H:%M_{args.modeltype}{args.proto_size}")
-
-    model = []
-    if args.language_model == 'Bert' or args.language_model == 'GPT2':
-        if args.modeltype == 'dist':
-            model = ProtoPNetDist(args)
-        else:
-            model = ProtoPNetConv(args)
-    elif args.language_model == 'SentBert':
-        model = ProtoNet(args)
+    time_stmp = datetime.datetime.now().strftime(f"%m-%d %H:%M_{args.num_prototypes}{args.modeltype}{args.proto_size}")
 
     print(f"Running on gpu {args.gpu}")
     model = torch.nn.DataParallel(model, device_ids=args.gpu)
     # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
-
-    fname = args.language_model
-    if not args.compute_emb:
-        embedding_train = load_embedding(args, fname, 'train')
-        embedding_val = load_embedding(args, fname, 'val')
-    else:
-        embedding_train = model.module.compute_embedding(text_train, args)
-        embedding_val = model.module.compute_embedding(text_val, args)
-        save_embedding(embedding_train, args, fname, 'train')
-        save_embedding(embedding_val, args, fname, 'val')
-        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     num_epochs = args.num_epochs
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -179,7 +161,6 @@ def train(args, text_train, labels_train, text_val, labels_val):
                     all_labels += label_batch.cpu().numpy().tolist()
 
                 loss_val = np.mean(losses_per_batch)
-
                 acc_val = balanced_accuracy_score(all_labels, all_preds)
                 print(f"Validation: mean loss {loss_val:.4f}, acc_val {100 * acc_val:.4f}")
 
@@ -195,7 +176,7 @@ def train(args, text_train, labels_train, text_val, labels_val):
     return os.path.join(save_dir, time_stmp, 'best_model.pth.tar')
 
 
-def test(args, text_train, labels_train, text_test, labels_test, model_path):
+def test(args, embedding_train, labels_train, embedding_test, labels_test, text_train, model, model_path):
     if not model_path:
         load_path = "./experiments/train_results/*"
         model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
@@ -203,31 +184,11 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         model_path = model_paths[-1]
     print("\nStarting evaluation, loading model:", model_path)
 
-    model = []
-    if args.language_model == 'Bert' or args.language_model == 'GPT2':
-        if args.modeltype == 'dist':
-            model = ProtoPNetDist(args)
-        else:
-            model = ProtoPNetConv(args)
-    elif args.language_model == 'SentBert':
-        model = ProtoNet(args)
-
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint['state_dict'])
     model.to(f'cuda:{args.gpu[0]}')
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
-
-    fname = args.language_model
-    if not args.compute_emb:
-        embedding_train = load_embedding(args, fname, 'train')
-        embedding_test = load_embedding(args, fname, 'test')
-    else:
-        embedding_train = model.compute_embedding(text_train, args)
-        embedding_test = model.compute_embedding(text_test, args)
-        save_embedding(embedding_train, args, fname, 'train')
-        save_embedding(embedding_test, args, fname, 'test')
-        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     all_preds = []
     all_labels = []
@@ -270,7 +231,6 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
 
         weights = model.get_proto_weights()
         save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
-        #os.makedirs(os.path.dirname(save_path), exist_ok=True)
         txt_file = open(save_path, "w+")
         for arg in vars(args):
             txt_file.write(f"{arg}: {vars(args)[arg]}\n")
@@ -285,9 +245,58 @@ def test(args, text_train, labels_train, text_test, labels_test, model_path):
         # get prototypes
         prototypes = model.get_protos().cpu().numpy()
         embedding_train = embedding_train.cpu().numpy()
-        if len(embedding_train.size()) == 2:
+        if len(embedding_train.shape) == 2:
             visualize_protos(embedding_train, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
             # visualize_protos(embedding_train, labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+
+
+def query(args, embedding_train, labels_train, text_train, model, model_path):
+    if not model_path:
+        load_path = "./experiments/train_results/*"
+        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        model_paths.sort()
+        model_path = model_paths[-1]
+    print("\nEvaluate query, loading model:", model_path)
+
+    checkpoint = torch.load(model_path)
+    model.load_state_dict(checkpoint['state_dict'])
+    model.to(f'cuda:{args.gpu[0]}')
+    model.eval()
+
+    embedding_query = model.compute_embedding(args.query, args)
+    torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+    __import__("pdb").set_trace()
+    train_batches = torch.utils.data.DataLoader(embedding_train, batch_size=args.batch_size,
+                                                shuffle=False, pin_memory=False, num_workers=0)  # , drop_last=True)
+    dist = []
+    with torch.no_grad():
+        for batch in train_batches:
+            batch = batch.to(f'cuda:{args.gpu[0]}')
+            _, distances, _ = model.forward(batch)
+            dist.append(distances)
+
+    # "convert" prototype embedding to text (take text of nearest training sample)
+    proto_texts = model.nearest_neighbors(dist, text_train, labels_train, model)
+    distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
+
+    predicted = torch.argmax(predicted_label).cpu()
+
+    query2proto = torch.argmin(distances)
+    nearest_proto = proto_texts[query2proto]
+    weights = model.get_proto_weights()
+
+    save_path = os.path.join(os.path.dirname(model_path), "query.txt")
+    txt_file = open(save_path, "w+")
+    txt_file.write(''.join(args.query) + "\n")
+    txt_file.write(f"nearest prototype id: {query2proto+1}\n")
+    txt_file.write(f"weights: {weights[query2proto]}\n")
+    txt_file.write(str(nearest_proto) + "\n")
+    txt_file.write(f"predicted: {predicted}\n")
+    for line in weights:
+        txt_file.write(f"{line} \n")
+    for arg in vars(args):
+        txt_file.write(f"{arg}: {vars(args)[arg]}\n")
+    txt_file.close()
 
 
 if __name__ == '__main__':
@@ -316,10 +325,40 @@ if __name__ == '__main__':
         idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
 
-    if args.mode == 'both':
-        model_path = train(args, text_train, labels_train, text_val, labels_val)
-        test(args, text_train, labels_train, text_test, labels_test, model_path)
+    model = []
+    fname = args.language_model
+    if fname == 'Bert' or fname == 'GPT2':
+        if args.modeltype == 'dist':
+            model = ProtoPNetDist(args)
+        elif args.modeltype == 'conv':
+            model = ProtoPNetConv(args)
+    elif fname == 'SentBert':
+        model = ProtoNet(args)
+
+    avoid = ''
+    if args.avoid_spec_token:
+        avoid = '_avoid'
+
+    if not args.compute_emb:
+        embedding_train = load_embedding(args, fname, 'train' + avoid)
+        embedding_val = load_embedding(args, fname, 'val' + avoid)
+        embedding_test = load_embedding(args, fname, 'test' + avoid)
+    else:
+        embedding_train = model.compute_embedding(text_train, args)
+        embedding_val = model.compute_embedding(text_val, args)
+        embedding_test = model.compute_embedding(text_test, args)
+        save_embedding(embedding_train, args, fname, 'train' + avoid)
+        save_embedding(embedding_val, args, fname, 'val' + avoid)
+        save_embedding(embedding_test, args, fname, 'test' + avoid)
+        torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
+    if args.mode == 'all':
+        model_path = train(args, embedding_train, labels_train, embedding_val, labels_val, model)
+        test(args, embedding_train, labels_train, embedding_test, labels_test, text_train, model, model_path)
+        query(args, embedding_train, labels_train, text_train, model, model_path)
     elif args.mode == 'train':
-        train(args, text_train, labels_train, text_val, labels_val)
+        model_path = train(args, embedding_train, labels_train, embedding_val, labels_val, model)
     elif args.mode == 'test':
-        test(args, text_train, labels_train, text_test, labels_test, [])
+        test(args, embedding_train, labels_train, embedding_test, labels_test, text_train, model, [])
+    elif args.mode == 'query':
+        query(args, embedding_train, labels_train, text_train, model, [])
