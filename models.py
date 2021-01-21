@@ -38,10 +38,10 @@ class ProtoNet(nn.Module):
         return embedding
 
     @staticmethod
-    def nearest_neighbors(distances, text_train, labels_train, _):
+    def nearest_neighbors(distances, text_train, labels_train):
         distances = torch.cat(distances)
         _, nearest_ids = torch.topk(distances, 1, dim=0, largest=False)
-        proto_texts = [[f"P{proto+1}", f"sentence {index}", f"label {labels_train[index]}", text_train[index]]
+        proto_texts = [f"P{proto+1} | sentence {index} | label {labels_train[index]} | text: {text_train[index]}"
                        for proto, sent in enumerate(nearest_ids.cpu().numpy().T) for index in sent]
         return proto_texts
 
@@ -113,9 +113,9 @@ class ProtoPNet(nn.Module):
                 # setting embedding values of PAD, CLS and SEP token to a high number to make them "unlikely regarded"
                 # in distance computation
                 inputs_['attention_mask'][inputs_['attention_mask']==0] = 1e3
-                for n in range(len(inputs_['attention_mask'])):
-                    inputs_['attention_mask'][n][0] = 1e3
-                    inputs_['attention_mask'][n][inputs_['input_ids'][n]==102] = 1e3
+                # for n in range(len(inputs_['attention_mask'])):
+                #     inputs_['attention_mask'][n][0] = 1e3
+                #     inputs_['attention_mask'][n][inputs_['input_ids'][n]==102] = 1e3
                 word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
             else:
                 word_embedding.extend(outputs[0].cpu())
@@ -158,7 +158,7 @@ class ProtoPNetConv(ProtoPNet):
 
         return distances
 
-    def nearest_neighbors(self, distances, text_train, labels_train, model):
+    def nearest_neighbors(self, distances, text_train, labels_train):
         argmin_dist, prototype_distances, nearest_conv =  [], [], []
         # compute min and argmin value in each sentence for each prototype
         for d in distances:
@@ -184,7 +184,7 @@ class ProtoPNetConv(ProtoPNet):
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
             token2text = self.tokenizer.decode(text_nearest[i][w_indices].tolist())
-            proto_texts.append([f"sentence {s_index}", f"label {labels_train[s_index]}", token2text, text_train[s_index]])
+            proto_texts.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: {text_train[s_index]}")
 
         return proto_texts
 
@@ -214,23 +214,23 @@ class ProtoPNetDist(ProtoPNet):
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
 
-    def nearest_neighbors(self, distances, text_train, labels_train, model):
+    def nearest_neighbors(self, distances, text_train, labels_train):
         distances = torch.cat(distances)
         min_distances_per_sentence = -F.max_pool2d(-distances,
                                       kernel_size=(distances.size(2),1))
         min_distances_sent = torch.sum(torch.abs(min_distances_per_sentence), dim=-1)
         # get argmin for number of protos along number of sentence dimension
-        nearest_sentence = torch.argmin(min_distances_sent, dim=0).squeeze().cpu().numpy()
+        nearest_sent = torch.argmin(min_distances_sent, dim=0).squeeze().cpu().numpy()
 
         min_distances_word = -F.max_pool2d(-distances.permute(1,2,0,3),
                                       kernel_size=(distances.size(0),1))
-        nearest_word = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
+        nearest_words = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
 
         proto_texts = []
         text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
-        for (s_index, w_index) in zip(nearest_sentence, nearest_word):
-            token2text = self.tokenizer.decode(text_tknzd[s_index][w_index].tolist())
-            proto_texts.append([f"sentence {s_index}", f"label {labels_train[s_index]}", token2text, text_train[s_index]])
+        for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
+            token2text = self.tokenizer.decode(text_tknzd[s_index][w_indices].tolist()) # TODO: bug that words are appended together
+            proto_texts.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: {text_train[s_index]}")
 
         return proto_texts
 

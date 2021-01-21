@@ -221,7 +221,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
             dist.append(distances)
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train, model)
+        proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
 
         weights = model.module.get_proto_weights()
         save_path = os.path.join(os.path.dirname(model_path), "prototypes.txt")
@@ -231,7 +231,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
         txt_file.write(f"test loss: {loss:.4f}\n")
         txt_file.write(f"test acc: {100*acc_test:.2f}\n")
         for line in proto_texts:
-            txt_file.write(str(line) + "\n")
+            txt_file.write(line + "\n")
         for line in weights:
             txt_file.write(str(line) + "\n")
         txt_file.close()
@@ -268,7 +268,7 @@ def query(args, embedding_train, labels_train, text_train, model, model_path):
             dist.append(distances)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train, model)
+    proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
 
     predicted = torch.argmax(predicted_label).cpu()
@@ -282,7 +282,7 @@ def query(args, embedding_train, labels_train, text_train, model, model_path):
     txt_file.write(''.join(args.query) + "\n")
     txt_file.write(f"nearest prototype id: {query2proto+1}\n")
     txt_file.write(f"weights: {weights[query2proto]}\n")
-    txt_file.write(str(nearest_proto) + "\n")
+    txt_file.write(nearest_proto + "\n")
     txt_file.write(f"predicted: {predicted}\n")
     for line in weights:
         txt_file.write(f"{line} \n")
@@ -341,9 +341,9 @@ if __name__ == '__main__':
         embedding_val = load_embedding(args, fname, 'val' + avoid)
         embedding_test = load_embedding(args, fname, 'test' + avoid)
     else:
-        embedding_train = model.compute_embedding(text_train, args)
-        embedding_val = model.compute_embedding(text_val, args)
-        embedding_test = model.compute_embedding(text_test, args)
+        embedding_train = model.module.compute_embedding(text_train, args)
+        embedding_val = model.module.compute_embedding(text_val, args)
+        embedding_test = model.module.compute_embedding(text_test, args)
         save_embedding(embedding_train, args, fname, 'train' + avoid)
         save_embedding(embedding_val, args, fname, 'val' + avoid)
         save_embedding(embedding_test, args, fname, 'test' + avoid)
