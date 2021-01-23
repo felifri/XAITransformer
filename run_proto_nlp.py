@@ -62,7 +62,7 @@ parser.add_argument('--avoid_spec_token', type=bool, default=False,
                     help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
 parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
-parser.add_argument('--query', type=str, default='this is a very interesting movie', nargs='+',
+parser.add_argument('--query', type=str, default='you are a faggot', nargs='+',
                     help='Type your query to test the model and get classification explanation')
 
 def train(args, embedding_train, labels_train, embedding_val, labels_val, model):
@@ -159,15 +159,16 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
                 acc_val = balanced_accuracy_score(all_labels, all_preds)
                 print(f"Validation: mean loss {loss_val:.4f}, acc_val {100 * acc_val:.4f}")
 
-            save_checkpoint(save_dir, {
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'hyper_params': args,
-                'acc_val': acc_val,
-            }, time_stmp, best=acc_val >= best_acc)
-            if acc_val >= best_acc:
+            if acc_val > best_acc:
                 best_acc = acc_val
+                save_checkpoint(save_dir, {
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'hyper_params': args,
+                    'acc_val': acc_val,
+                }, time_stmp)
+
     return os.path.join(save_dir, time_stmp, 'best_model.pth.tar')
 
 

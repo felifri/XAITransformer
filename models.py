@@ -152,7 +152,7 @@ class ProtoPNetConv(ProtoPNet):
             x2_patch_sum = F.conv1d(input=x2, weight=self.ones[:n], dilation=d)
             xp = F.conv1d(input=x, weight=self.protolayer[j:j+n], dilation=d)
             # L2-distance aka sqrt(x² - 2xp + p²)
-            dist = torch.sqrt(torch.abs(x2_patch_sum - 2 * xp + p2_sum[j:j+n]))
+            dist = torch.sqrt(x2_patch_sum - 2 * xp + p2_sum[j:j+n])
             distances.append(dist)
             j += n
 

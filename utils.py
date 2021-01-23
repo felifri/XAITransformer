@@ -9,11 +9,10 @@ import pickle
 
 # __import__("pdb").set_trace()
 
-def save_checkpoint(save_dir, state, time_stmp, best, filename='best_model.pth.tar'):
-    if best:
-        save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
-        os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-        torch.save(state, save_path_checkpoint)
+def save_checkpoint(save_dir, state, time_stmp, filename='best_model.pth.tar'):
+    save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
+    os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
+    torch.save(state, save_path_checkpoint)
 
 def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
         # visualize prototypes
