@@ -41,6 +41,62 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
         ax.legend()
         fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
 
+def proto_loss(prototype_distances, label, model, args):
+    if model.module.class_specific:
+        max_dist = torch.prod(torch.tensor(model.module.protolayer.size())) # proxy variable, could be any high value
+
+        # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
+        # calculate cluster cost, high cost if same class protos are far distant
+        prototypes_of_correct_class = torch.t(model.module.prototype_class_identity[:, label]).to(f'cuda:{args.gpu[0]}')
+        inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=1)
+        clust_loss = torch.mean(max_dist - inverted_distances)
+        # assures that each sample is not too far distant form a prototype of its class
+        inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=0)
+        distr_loss = torch.mean(max_dist - inverted_distances)
+
+        # calculate separation cost, low (highly negative) cost if other class protos are far distant
+        prototypes_of_wrong_class = 1 - prototypes_of_correct_class
+        inverted_distances_to_nontarget_prototypes, _ = \
+            torch.max((max_dist - prototype_distances) * prototypes_of_wrong_class, dim=1)
+        sep_loss = - torch.mean(max_dist - inverted_distances_to_nontarget_prototypes)
+    else:
+        # Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
+        # r1: compute min distance from each prototype to an example, i.e batch_size * num_prototypes -> num_prototypes.
+        # this assures that each prototype is as close as possible to at least one of the examples
+        distr_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
+        # r2: compute min distance from each example to prototype, i.e batch_size * num_prototypes -> batch_size.
+        # this assures that each example is as close as possible to one of the prototypes, which is something like a
+        # cluster cost
+        clust_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
+        sep_loss = 0
+
+    # assures that each prototype itself does not consist out of the exact same input entry multiple times
+    dist_sum = 0
+    if args.modeltype == 'dist' and args.proto_size > 1:
+        comb = torch.combinations(torch.arange(args.proto_size), r=2)
+        for k, l in comb:
+            dist_sum += torch.dist(model.module.protolayer[:, k, :], model.module.protolayer[:, l, :], p=2)
+        # if distance small -> higher penalty
+        divers1_loss = - dist_sum / comb.size(0)
+    else:
+        divers1_loss = 0
+
+    # diversity loss, assures that prototypes are not too close
+    dist_sum = 0
+    comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
+    for k, l in comb:
+        dist_sum += torch.dist(model.module.protolayer[k, :, :], model.module.protolayer[l, :, :], p=2)
+    # if distance small -> higher penalty
+    divers2_loss = - dist_sum / comb.size(0)
+
+    if model.module.use_l1_mask:
+        l1_mask = 1 - torch.t(model.module.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
+        l1_loss = (model.module.fc.weight * l1_mask).norm(p=1)
+    else:
+        l1_loss = model.module.fc.weight.norm(p=1)
+
+    return distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss
+
 ####################################################
 ###### load toxicity data ##########################
 ####################################################
@@ -126,12 +182,11 @@ def parse_all(tag, args, file_dir=None):
 ####################################################
 
 def get_reviews(args):
-    data_dir = args.data_dir
     set_list = ['train', 'dev', 'test']
     text, label = [], []
     # join train, dev, test; shuffle and split later
     for set_name in set_list:
-        set_dir = os.path.join(data_dir, set_name)
+        set_dir = os.path.join(args.data_dir, args.data_name, set_name)
         text_tmp = pickle.load(open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
         # join tokenized sentences back to full sentences for sentenceBert
         text_tmp = [' '.join(sub_list) for sub_list in text_tmp]

@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model
-from math import floor
 import transformers
 import logging
 from transformers import BertForSequenceClassification
@@ -16,17 +15,23 @@ class ProtoNet(nn.Module):
         self.enc_size = self.sentBert.get_sentence_embedding_dimension()
         for param in self.sentBert.parameters():
             param.requires_grad = False
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, 1))),
                                                              requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
+        # define which prototype belongs to which class (onehot encoded matrix)
+        self.prototype_class_identity = torch.zeros(args.num_prototypes, args.num_classes)
+        self.prototype_class_identity[::2, 0] = 1
+        self.prototype_class_identity[1::2, 1] = 1
+        self.class_specific = True
+        self.use_l1_mask = True
 
     def forward(self, embedding):
-        prototype_distances = torch.cdist(embedding, self.protolayer, p=2)
+        prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
         class_out = self.fc(prototype_distances)
         return prototype_distances, prototype_distances, class_out
 
     def get_protos(self):
-        return self.protolayer
+        return self.protolayer.squeeze()
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -45,16 +50,6 @@ class ProtoNet(nn.Module):
                        for proto, sent in enumerate(nearest_ids.cpu().numpy().T) for index in sent]
         return proto_texts
 
-    @staticmethod
-    def proto_loss(prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        """
-        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-        # only sentence level, no word level thus
-        p1_loss = 0
-        return r1_loss, r2_loss, p1_loss
 
 class BaseNet(ProtoNet):
     def __init__(self, args):
@@ -94,6 +89,13 @@ class ProtoPNet(nn.Module):
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.proto_size, self.enc_size))),
                                        requires_grad=True)
 
+        # define which prototype belongs to which class (onehot encoded matrix)
+        self.prototype_class_identity = torch.zeros(self.num_protos, args.num_classes)
+        self.prototype_class_identity[::2, 0] = 1
+        self.prototype_class_identity[1::2, 1] = 1
+        self.class_specific = True
+        self.use_l1_mask = True
+
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
 
@@ -122,12 +124,13 @@ class ProtoPNet(nn.Module):
         embedding = torch.stack(word_embedding, dim=0)
         return embedding
 
+
 class ProtoPNetConv(ProtoPNet):
     def __init__(self, args):
         super(ProtoPNetConv, self).__init__(args)
         self.ones = nn.Parameter(torch.ones(args.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
         self.dilated = args.dilated
-        self.num_filters = [floor(self.num_protos/len(self.dilated))] * len(self.dilated)
+        self.num_filters = [self.num_protos // len(self.dilated)] * len(self.dilated)
         self.num_filters[0] += self.num_protos % len(self.dilated)
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
@@ -188,17 +191,6 @@ class ProtoPNetConv(ProtoPNet):
 
         return proto_texts
 
-    @staticmethod
-    def proto_loss(prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        """
-        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-
-        # conv assures itself that same input entries are not possible
-        p1_loss = 0
-        return r1_loss, r2_loss, p1_loss
 
 class ProtoPNetDist(ProtoPNet):
     def __init__(self, args):
@@ -234,25 +226,6 @@ class ProtoPNetDist(ProtoPNet):
 
         return proto_texts
 
-    def proto_loss(self, prototype_distances):
-        """
-        Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        """
-        r1_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        r2_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-
-        # assures that each prototype itself does not consist out of the exact same input entry multiple times
-        if self.proto_size > 1:
-            dist = []
-            comb = torch.combinations(torch.arange(self.proto_size), r=2)
-            for k, l in comb:
-                dist.append(torch.mean(torch.abs((self.protolayer[:, k, :] - self.protolayer[:, l, :])),dim=1))
-            # if distance small -> high penalty, check to not divide by 0
-            _mean = torch.mean(torch.stack(dist))
-            p1_loss = 1 / _mean if _mean else 1000
-        else:
-            p1_loss = 0
-        return r1_loss, r2_loss, p1_loss
 
 class BasePartsNet(ProtoPNet):
     def __init__(self, args):

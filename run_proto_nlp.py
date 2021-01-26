@@ -8,12 +8,11 @@ import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
-# from transformers import get_linear_schedule_with_warmup
 from tqdm import tqdm
 from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
-from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos
+from utils import save_embedding, load_embedding, save_checkpoint, load_data, visualize_protos, proto_loss
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="all", type=str, choices=['train','test','query','all'],
@@ -26,18 +25,24 @@ parser.add_argument('-bs', '--batch_size', default=650, type=int,
                     help='Select batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
-parser.add_argument('--data_dir', default='./data/rt-polarity',
+parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
-parser.add_argument('-l1','--lambda1', default=0.1, type=float,
-                    help='Weight for prototype loss computation')
+parser.add_argument('-l1','--lambda1', default=0.02, type=float,
+                    help='Weight for prototype distribution loss')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
-                    help='Weight for prototype loss computation')
-parser.add_argument('-l3','--lambda3', default=0.5, type=float,
-                    help='Weight for padding loss computation')
+                    help='Weight for prototype cluster loss')
+parser.add_argument('-l3','--lambda3', default=0.01, type=float,
+                    help='Weight for prototype separation loss')
+parser.add_argument('-l4','--lambda4', default=0.01, type=float,
+                    help='Weight for between prototype diversity loss')
+parser.add_argument('-l5','--lambda5', default=0.01, type=float,
+                    help='Weight for wihtin prototype diversity loss')
+parser.add_argument('-l6','--lambda6', default=1e-4, type=float,
+                    help='Weight for l1 weight regularization loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
@@ -50,7 +55,7 @@ parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TS
                     help='Which transformation should be used to visualize the prototypes')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
-parser.add_argument('--proto_size', type=int, default=4,
+parser.add_argument('--proto_size', type=int, default=1,
                     help='Define how many words should be used to define a prototype')
 parser.add_argument('--modeltype', type=str, default='dist', choices=['conv','dist'],
                     help='Define which similarity computation to use')
@@ -71,7 +76,6 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
 
     num_epochs = args.num_epochs
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    # scheduler = get_linear_schedule_with_warmup(optimizer, num_epochs // 10, num_epochs)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
     model.train()
@@ -82,13 +86,15 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
     val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     for epoch in tqdm(range(num_epochs)):
-        all_preds = []
-        all_labels = []
+        all_preds ,all_labels = [], []
         losses_per_batch = []
         ce_loss_per_batch = []
-        r1_loss_per_batch = []
-        r2_loss_per_batch = []
-        p1_loss_per_batch = []
+        distr_loss_per_batch = []
+        clust_loss_per_batch = []
+        sep_loss_per_batch = []
+        divers1_loss_per_batch = []
+        divers2_loss_per_batch = []
+        l1_loss_per_batch = []
 
         # Update the RTPT
         rtpt.step()
@@ -102,11 +108,15 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
+            distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+                proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
-                   args.lambda1 * r1_loss + \
-                   args.lambda2 * r2_loss + \
-                   args.lambda3 * p1_loss
+                   args.lambda1 * distr_loss + \
+                   args.lambda2 * clust_loss + \
+                   args.lambda3 * sep_loss + \
+                   args.lambda4 * divers1_loss + \
+                   args.lambda5 * divers2_loss + \
+                   args.lambda6 * l1_loss
 
             _, predicted = torch.max(predicted_label.data, 1)
             all_preds += predicted.cpu().numpy().tolist()
@@ -117,19 +127,25 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
-            r1_loss_per_batch.append(float(r1_loss))
-            r2_loss_per_batch.append(float(r2_loss))
-            p1_loss_per_batch.append(float(p1_loss))
+            distr_loss_per_batch.append(float(args.lambda1 * distr_loss))
+            clust_loss_per_batch.append(float(args.lambda2 * clust_loss))
+            sep_loss_per_batch.append(float(args.lambda3 * sep_loss))
+            divers1_loss_per_batch.append(float(args.lambda4 * divers1_loss))
+            divers2_loss_per_batch.append(float(args.lambda5 * divers2_loss))
+            l1_loss_per_batch.append(float(args.lambda6 * l1_loss))
 
-        # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
-        r1_mean_loss = np.mean(r1_loss_per_batch)
-        r2_mean_loss = np.mean(r2_loss_per_batch)
-        p1_mean_loss = np.mean(p1_loss_per_batch)
+        distr_mean_loss = np.mean(distr_loss_per_batch)
+        clust_mean_loss = np.mean(clust_loss_per_batch)
+        sep_mean_loss = np.mean(sep_loss_per_batch)
+        divers1_mean_loss = np.mean(divers1_loss_per_batch)
+        divers2_mean_loss = np.mean(divers2_loss_per_batch)
+        l1_mean_loss = np.mean(l1_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
-        print(f"Epoch {epoch+1}, losses: mean {mean_loss:.4f}, ce {ce_mean_loss:.4f}, r1 {r1_mean_loss:.4f}, "
-              f"r2 {r2_mean_loss:.4f}, p1 {p1_mean_loss:.4f}, train acc {100 * acc:.4f}")
+        print(f"Epoch {epoch+1}, losses: mean {mean_loss:.3f}, ce {ce_mean_loss:.3f}, distr {distr_mean_loss:.3f}, "
+              f"clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers1 {divers1_mean_loss:.3f}, "
+              f"divers2 {divers2_mean_loss:.3f}, l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}")
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
@@ -144,11 +160,15 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
 
                     # compute individual losses and backward step
                     ce_loss = ce_crit(predicted_label, label_batch)
-                    r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
+                    distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+                        proto_loss(prototype_distances, label_batch, model, args)
                     loss = ce_loss + \
-                           args.lambda1 * r1_loss + \
-                           args.lambda2 * r2_loss + \
-                           args.lambda3 * p1_loss
+                           args.lambda1 * distr_loss + \
+                           args.lambda2 * clust_loss + \
+                           args.lambda3 * sep_loss + \
+                           args.lambda4 * divers1_loss + \
+                           args.lambda5 * divers2_loss + \
+                           args.lambda6 * l1_loss
 
                     losses_per_batch.append(float(loss))
                     _, predicted = torch.max(predicted_label.data, 1)
@@ -157,7 +177,7 @@ def train(args, embedding_train, labels_train, embedding_val, labels_val, model)
 
                 loss_val = np.mean(losses_per_batch)
                 acc_val = balanced_accuracy_score(all_labels, all_preds)
-                print(f"Validation: mean loss {loss_val:.4f}, acc_val {100 * acc_val:.4f}")
+                print(f"Validation: mean loss {loss_val:.3f}, acc_val {100 * acc_val:.3f}")
 
             if acc_val > best_acc:
                 best_acc = acc_val
@@ -198,11 +218,15 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            r1_loss, r2_loss, p1_loss = model.module.proto_loss(prototype_distances)
+            distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+                proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
-                   args.lambda1 * r1_loss + \
-                   args.lambda2 * r2_loss + \
-                   args.lambda3 * p1_loss
+                   args.lambda1 * distr_loss + \
+                   args.lambda2 * clust_loss + \
+                   args.lambda3 * sep_loss + \
+                   args.lambda4 * divers1_loss + \
+                   args.lambda5 * divers2_loss + \
+                   args.lambda6 * l1_loss
 
             losses_per_batch.append(float(loss))
             _, predicted = torch.max(predicted_label.data, 1)
@@ -211,7 +235,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
 
         loss = np.mean(losses_per_batch)
         acc_test = balanced_accuracy_score(all_labels, all_preds)
-        print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
+        print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
         train_batches = torch.utils.data.DataLoader(embedding_train, batch_size=args.batch_size,
                                               shuffle=False, pin_memory=False, num_workers=0)#, drop_last=True)
@@ -229,7 +253,7 @@ def test(args, embedding_train, labels_train, embedding_test, labels_test, text_
         txt_file = open(save_path, "w+")
         for arg in vars(args):
             txt_file.write(f"{arg}: {vars(args)[arg]}\n")
-        txt_file.write(f"test loss: {loss:.4f}\n")
+        txt_file.write(f"test loss: {loss:.3f}\n")
         txt_file.write(f"test acc: {100*acc_test:.2f}\n")
         for line in proto_texts:
             txt_file.write(line + "\n")
@@ -317,6 +341,7 @@ if __name__ == '__main__':
     if args.one_shot:
         idx = random.sample(range(len(text_train)), 100)
         text_train = list(text_train[i] for i in idx)
+        args.compute_emb = True
 
     model = []
     fname = args.language_model
