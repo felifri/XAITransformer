@@ -115,9 +115,9 @@ class ProtoPNet(nn.Module):
                 # setting embedding values of PAD, CLS and SEP token to a high number to make them "unlikely regarded"
                 # in distance computation
                 inputs_['attention_mask'][inputs_['attention_mask']==0] = 1e3
-                # for n in range(len(inputs_['attention_mask'])):
+                for n in range(len(inputs_['attention_mask'])):
                 #     inputs_['attention_mask'][n][0] = 1e3
-                #     inputs_['attention_mask'][n][inputs_['input_ids'][n]==102] = 1e3
+                    inputs_['attention_mask'][n][inputs_['input_ids'][n]==102] = 1e3
                 word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
             else:
                 word_embedding.extend(outputs[0].cpu())
@@ -155,7 +155,7 @@ class ProtoPNetConv(ProtoPNet):
             x2_patch_sum = F.conv1d(input=x2, weight=self.ones[:n], dilation=d)
             xp = F.conv1d(input=x, weight=self.protolayer[j:j+n], dilation=d)
             # L2-distance aka sqrt(x² - 2xp + p²)
-            dist = torch.sqrt(x2_patch_sum - 2 * xp + p2_sum[j:j+n])
+            dist = torch.sqrt(F.relu(x2_patch_sum - 2 * xp + p2_sum[j:j+n]))
             distances.append(dist)
             j += n
 
@@ -230,20 +230,20 @@ class ProtoPNetDist(ProtoPNet):
 class BasePartsNet(ProtoPNet):
     def __init__(self, args):
         super(BasePartsNet, self).__init__(args)
-        self.fc = nn.Sequential(
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(self.enc_size, 20),
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(20, args.num_classes, bias=False),
+
+        self.fc1 = nn.Sequential(
+            nn.Linear(self.enc_size, 1),
+            # nn.Dropout(),
+            # nn.ReLU()
+        )
+        self.fc2 = nn.Sequential(
+            nn.Linear(args.seq_length, args.num_classes, bias=False),
+            # nn.Dropout(),
+            # nn.ReLU())
         )
 
     def forward(self, embedding):
-        emb = embedding.view(embedding.size(0),-1)
-        lin = nn.Linear(emb.size(1),self.enc_size)
-        emb = lin(emb)
-        return self.fc(emb)
+        return self.fc2(self.fc1(embedding).squeeze())
 
 
 def _from_pretrained(cls, *args, **kw):
