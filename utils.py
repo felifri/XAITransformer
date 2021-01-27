@@ -42,12 +42,12 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
         fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
 
 def proto_loss(prototype_distances, label, model, args):
-    if model.module.class_specific:
+    if args.class_specific:
         max_dist = torch.prod(torch.tensor(model.module.protolayer.size())) # proxy variable, could be any high value
 
         # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
         # calculate cluster cost, high cost if same class protos are far distant
-        prototypes_of_correct_class = torch.t(model.module.prototype_class_identity[:, label]).to(f'cuda:{args.gpu[0]}')
+        prototypes_of_correct_class = torch.t(args.prototype_class_identity[:, label]).to(f'cuda:{args.gpu[0]}')
         inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=1)
         clust_loss = torch.mean(max_dist - inverted_distances)
         # assures that each sample is not too far distant form a prototype of its class
@@ -89,8 +89,8 @@ def proto_loss(prototype_distances, label, model, args):
     # if distance small -> higher penalty
     divers2_loss = - dist_sum / comb.size(0)
 
-    if model.module.use_l1_mask:
-        l1_mask = 1 - torch.t(model.module.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
+    if args.use_l1_mask:
+        l1_mask = 1 - torch.t(args.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
         l1_loss = (model.module.fc.weight * l1_mask).norm(p=1)
     else:
         l1_loss = model.module.fc.weight.norm(p=1)

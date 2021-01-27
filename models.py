@@ -18,12 +18,6 @@ class ProtoNet(nn.Module):
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, 1))),
                                                              requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
-        # define which prototype belongs to which class (onehot encoded matrix)
-        self.prototype_class_identity = torch.zeros(args.num_prototypes, args.num_classes)
-        self.prototype_class_identity[::2, 0] = 1
-        self.prototype_class_identity[1::2, 1] = 1
-        self.class_specific = True
-        self.use_l1_mask = True
 
     def forward(self, embedding):
         prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
@@ -88,13 +82,6 @@ class ProtoPNet(nn.Module):
                 )
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.proto_size, self.enc_size))),
                                        requires_grad=True)
-
-        # define which prototype belongs to which class (onehot encoded matrix)
-        self.prototype_class_identity = torch.zeros(self.num_protos, args.num_classes)
-        self.prototype_class_identity[::2, 0] = 1
-        self.prototype_class_identity[1::2, 1] = 1
-        self.class_specific = True
-        self.use_l1_mask = True
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
