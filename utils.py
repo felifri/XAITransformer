@@ -9,11 +9,6 @@ import pickle
 
 # __import__("pdb").set_trace()
 
-def save_checkpoint(save_dir, state, time_stmp, filename='best_model.pth.tar'):
-    save_path_checkpoint = os.path.join(save_dir, time_stmp, filename)
-    os.makedirs(os.path.dirname(save_path_checkpoint), exist_ok=True)
-    torch.save(state, save_path_checkpoint)
-
 def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
         # visualize prototypes
         if trans_type == 'PCA':
@@ -85,7 +80,10 @@ def proto_loss(prototype_distances, label, model, args):
     dist_sum = 0
     comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
     for k, l in comb:
-        dist_sum += torch.dist(model.module.protolayer[k, :, :], model.module.protolayer[l, :, :], p=2)
+        # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
+        # too far spread
+        dist = torch.dist(model.module.protolayer[k, :, :], model.module.protolayer[l, :, :], p=2)
+        dist_sum += torch.maximum(torch.tensor(19), dist)
     # if distance small -> higher penalty
     divers2_loss = - dist_sum / comb.size(0)
 
