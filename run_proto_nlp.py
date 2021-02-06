@@ -11,15 +11,15 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from rtpt import RTPT
 
-from models import ProtoPNetConv, ProtoPNetDist, ProtoNet
-from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss
+from models import ProtoPNetConv, ProtoNet
+from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="train test", type=str, nargs='+',
-                    help='What do you want to do? Select either any combination of train, test, query, finetune')
+                    help='What do you want to do? Select either any combination of train, test, query, finetune, prune')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='Select learning rate')
-parser.add_argument('-e', '--num_epochs', default=100, type=int,
+parser.add_argument('-e', '--num_epochs', default=200, type=int,
                     help='How many epochs?')
 parser.add_argument('-bs', '--batch_size', default=650, type=int,
                     help='Select batch size')
@@ -27,21 +27,19 @@ parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
-parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full', 'restaurant'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
 parser.add_argument('-l1','--lambda1', default=0.02, type=float,
                     help='Weight for prototype distribution loss')
-parser.add_argument('-l2','--lambda2', default=0.2, type=float,
+parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype cluster loss')
-parser.add_argument('-l3','--lambda3', default=0.04, type=float,
+parser.add_argument('-l3','--lambda3', default=0.02, type=float,
                     help='Weight for prototype separation loss')
-parser.add_argument('-l4','--lambda4', default=0.02, type=float,
-                    help='Weight for between prototype diversity loss')
-parser.add_argument('-l5','--lambda5', default=0.02, type=float,
+parser.add_argument('-l4','--lambda4', default=0.01, type=float,
                     help='Weight for wihtin prototype diversity loss')
-parser.add_argument('-l6','--lambda6', default=1e-3, type=float,
+parser.add_argument('-l5','--lambda5', default=1e-4, type=float,
                     help='Weight for l1 weight regularization loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -55,8 +53,8 @@ parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
 parser.add_argument('--proto_size', type=int, default=1,
                     help='Define how many words should be used to define a prototype')
-parser.add_argument('--modeltype', type=str, default='dist', choices=['conv','dist'],
-                    help='Define which similarity computation to use')
+parser.add_argument('--level', type=str, default='word', choices=['word','sentence'],
+                    help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
                     help='Define which language model to use')
 parser.add_argument('--dilated', type=int, default=[1], nargs='+',
@@ -84,8 +82,7 @@ def train(args, train_batches, val_batches, model):
         distr_loss_per_batch = []
         clust_loss_per_batch = []
         sep_loss_per_batch = []
-        divers1_loss_per_batch = []
-        divers2_loss_per_batch = []
+        divers_loss_per_batch = []
         l1_loss_per_batch = []
 
         # Update the RTPT
@@ -100,15 +97,14 @@ def train(args, train_batches, val_batches, model):
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
-                   args.lambda4 * divers1_loss + \
-                   args.lambda5 * divers2_loss + \
-                   args.lambda6 * l1_loss
+                   args.lambda4 * divers_loss + \
+                   args.lambda5 * l1_loss
 
             _, predicted = torch.max(predicted_label.data, 1)
             all_preds += predicted.cpu().numpy().tolist()
@@ -122,22 +118,20 @@ def train(args, train_batches, val_batches, model):
             distr_loss_per_batch.append(float(args.lambda1 * distr_loss))
             clust_loss_per_batch.append(float(args.lambda2 * clust_loss))
             sep_loss_per_batch.append(float(args.lambda3 * sep_loss))
-            divers1_loss_per_batch.append(float(args.lambda4 * divers1_loss))
-            divers2_loss_per_batch.append(float(args.lambda5 * divers2_loss))
-            l1_loss_per_batch.append(float(args.lambda6 * l1_loss))
+            divers_loss_per_batch.append(float(args.lambda5 * divers_loss))
+            l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
 
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         distr_mean_loss = np.mean(distr_loss_per_batch)
         clust_mean_loss = np.mean(clust_loss_per_batch)
         sep_mean_loss = np.mean(sep_loss_per_batch)
-        divers1_mean_loss = np.mean(divers1_loss_per_batch)
-        divers2_mean_loss = np.mean(divers2_loss_per_batch)
+        divers_mean_loss = np.mean(divers_loss_per_batch)
         l1_mean_loss = np.mean(l1_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
         print(f"Epoch {epoch+1}, losses: mean {mean_loss:.3f}, ce {ce_mean_loss:.3f}, distr {distr_mean_loss:.3f}, "
-              f"clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers1 {divers1_mean_loss:.3f}, "
-              f"divers2 {divers2_mean_loss:.3f}, l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}")
+              f"clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers {divers_mean_loss:.3f}, "
+              f"l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}")
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
@@ -152,15 +146,14 @@ def train(args, train_batches, val_batches, model):
 
                     # compute individual losses and backward step
                     ce_loss = ce_crit(predicted_label, label_batch)
-                    distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+                    distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                         proto_loss(prototype_distances, label_batch, model, args)
                     loss = ce_loss + \
                            args.lambda1 * distr_loss + \
                            args.lambda2 * clust_loss + \
                            args.lambda3 * sep_loss + \
-                           args.lambda4 * divers1_loss + \
-                           args.lambda5 * divers2_loss + \
-                           args.lambda6 * l1_loss
+                           args.lambda4 * divers_loss + \
+                           args.lambda5 * l1_loss
 
                     losses_per_batch.append(float(loss))
                     _, predicted = torch.max(predicted_label.data, 1)
@@ -182,15 +175,7 @@ def train(args, train_batches, val_batches, model):
 
 
 def test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model):
-    if not os.path.exists(args.model_path):
-        load_path = "./experiments/train_results/*"
-        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-        model_paths.sort()
-        args.model_path = model_paths[-1]
     print("\nStart evaluation, loading model:", args.model_path)
-
-    checkpoint = torch.load(args.model_path)
-    model.load_state_dict(checkpoint['state_dict'])
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
@@ -204,17 +189,16 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
             label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
             prototype_distances, _, predicted_label = model.forward(emb_batch)
 
-            # compute individual losses and backward step
+            # compute individual losses
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
-                   args.lambda4 * divers1_loss + \
-                   args.lambda5 * divers2_loss + \
-                   args.lambda6 * l1_loss
+                   args.lambda4 * divers_loss + \
+                   args.lambda5 * l1_loss
 
             losses_per_batch.append(float(loss))
             _, predicted = torch.max(predicted_label.data, 1)
@@ -232,12 +216,18 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
             dist.append(distances)
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
-
+        proto_ids, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
         weights = model.module.get_proto_weights()
-        fname = "prototypes.txt"
+
         if os.path.basename(args.model_path).startswith('finetuned'):
             fname = "finetuned_prototypes.txt"
+        elif os.path.basename(args.model_path).startswith('pruned'):
+            fname = "pruned_prototypes.txt"
+            _, new_proto_texts, mask = prune_prototypes(proto_texts, model, args)
+            for m in mask: proto_texts[m] = new_proto_texts[m]
+        else:
+            fname = "prototypes.txt"
+        proto_texts = [id + txt for id, txt in zip(proto_ids, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
         txt_file = open(save_path, "w+")
         for arg in vars(args):
@@ -252,22 +242,13 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
 
         # plot prototypes
         prototypes = model.module.get_protos().cpu().numpy()
-        embedding_train = embedding_train.cpu().numpy()
         if len(embedding_train.shape) == 2:
-            visualize_protos(embedding_train, labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
-            # visualize_protos(embedding_train, labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+            visualize_protos(embedding_train.cpu().numpy(), labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
+            # visualize_protos(embedding_train.cpu().numpy(), labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
 
 
 def query(args, train_batches, labels_train, text_train, model):
-    if not os.path.exists(args.model_path):
-        load_path = "./experiments/train_results/*"
-        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-        model_paths.sort()
-        args.model_path = model_paths[-1]
     print("\nEvaluate query, loading model:", args.model_path)
-
-    checkpoint = torch.load(args.model_path)
-    model.load_state_dict(checkpoint['state_dict'])
     model.eval()
 
     embedding_query = model.module.compute_embedding(args.query, args)
@@ -281,9 +262,9 @@ def query(args, train_batches, labels_train, text_train, model):
             dist.append(distances)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
+    proto_ids, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
+    proto_texts = [id+txt for id, txt in zip(proto_ids,proto_texts)]
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
-
     predicted = torch.argmax(predicted_label).cpu()
 
     query2proto = torch.argmin(distances)
@@ -305,40 +286,68 @@ def query(args, train_batches, labels_train, text_train, model):
 
 
 def finetune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
-    if not os.path.exists(args.model_path):
-        load_path = "./experiments/train_results/*"
-        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
-        model_paths.sort()
-        args.model_path = model_paths[-1]
     print("\nRetrain, loading model:", args.model_path)
-
-    checkpoint = torch.load(args.model_path)
-    model.load_state_dict(checkpoint['state_dict'])
 
     # protos2keep = list(map(int,input("Select prototypes to keep: ").split()))
     protos2keep = [1,5,6]
+    if not protos2keep:
+        protos2keep = list(range(args.num_prototypes))
 
+    # if mode == 'weights':
     # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
-    # gradient_mask_fc = torch.ones(model.module.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
-    # gradient_mask_fc[:,protos2keep] = 0
-    # model.module.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
-    # also do not update the selected prototypes that should be kept
+    gradient_mask_fc = torch.ones(model.module.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+    gradient_mask_fc[:,protos2keep] = 0
+    model.module.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+    # if mode == 'prototypes':
+    # also, do not update the selected prototypes that should be kept
     gradient_mask_proto = torch.ones(model.module.protolayer.size()).to(f'cuda:{args.gpu[0]}')
     gradient_mask_proto[protos2keep, :, :] = 0
     model.module.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
-    # model.module.protolayer.register_backward_hook(lambda grad: grad.mul_(gradient_mask_proto))
-
 
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'finetuned_best_model.pth.tar')
     train(args, train_batches, val_batches, model)
     test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
 
 
+def prune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
+    print("\nPrune, loading model:", args.model_path)
+    model.eval()
+    dist = []
+    for batch, _ in train_batches:
+        batch = batch.to(f'cuda:{args.gpu[0]}')
+        _, distances, _ = model.forward(batch)
+        dist.append(distances)
+    _, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
+
+    # prune prototypes by removing stop words
+    new_prototypes, _, mask = prune_prototypes(proto_texts, model, args)
+    # assign new prototypes and don't update them when retraining
+    model.module.protolayer.data[mask] = new_prototypes[mask]
+    model.module.protolayer.requires_grad = False
+
+    # update model with new parameters (prototypes)
+    args.model_path = os.path.join(os.path.dirname(args.model_path), 'pruned_best_model.pth.tar')
+    state = { 'state_dict': model.state_dict(), 'hyper_params': args}
+    torch.save(state, args.model_path)
+    # retrain network, only retrain last layer (fc)
+    train(args, train_batches, val_batches, model)
+    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
+
+
+# def adjust_prototypes():
+#     print("\nAdjust, loading model:", args.model_path)
+#     # remove prototypes
+#     protos2remove = [1,5,6]
+#     model.module.fc
+#     self.fc.weight.T.cpu().detach().numpy()
+#     # add prototypes
+
+
 if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
-    torch.set_num_threads(8)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object
@@ -357,11 +366,12 @@ if __name__ == '__main__':
     args.class_weights = [1-balance, balance]
 
     # define which prototype belongs to which class (onehot encoded matrix)
-    args.prototype_class_identity = torch.zeros(args.num_prototypes, args.num_classes)
-    args.prototype_class_identity[::2, 0] = 1
-    args.prototype_class_identity[1::2, 1] = 1
-    # args.prototype_class_identity[:round(balance), 0] = 1
-    # args.prototype_class_identity[round(balance):, 1] = 1
+    args.prototype_class_identity = torch.zeros(args.num_prototypes, args.num_classes).to(f'cuda:{args.gpu[0]}')
+    args.prototype_class_identity[::2,0] = 1
+    args.prototype_class_identity[1::2,1] = 1
+    # protos_per_class = round(balance*args.num_prototypes)
+    # args.prototype_class_identity[:protos_per_class, 0] = 1
+    # args.prototype_class_identity[protos_per_class:, 1] = 1
     args.class_specific = True
     args.use_l1_mask = True
 
@@ -371,13 +381,9 @@ if __name__ == '__main__':
         args.compute_emb = True
 
     model = []
-    fname = args.language_model
-    if fname == 'Bert' or fname == 'GPT2':
-        if args.modeltype == 'dist':
-            model = ProtoPNetDist(args)
-        elif args.modeltype == 'conv':
-            model = ProtoPNetConv(args)
-    elif fname == 'SentBert':
+    if args.level == 'word':
+        model = ProtoPNetConv(args)
+    elif args.level == 'sentence':
         model = ProtoNet(args)
 
     print(f"Running on gpu {args.gpu}")
@@ -389,6 +395,7 @@ if __name__ == '__main__':
     if args.avoid_spec_token:
         avoid = '_avoid'
 
+    fname = args.language_model + args.level
     if not args.compute_emb:
         embedding_train = load_embedding(args, fname, 'train' + avoid)
         embedding_val = load_embedding(args, fname, 'val' + avoid)
@@ -403,21 +410,30 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
-                                                shuffle=True, pin_memory=True, num_workers=0)#, drop_last=True)
+                                                shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
                                                shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
 
-    time_stmp = datetime.datetime.now().strftime(f"%d-%m %H:%M_{args.num_prototypes}{args.modeltype}{args.proto_size}")
+    time_stmp = datetime.datetime.now().strftime(f"%d-%m %H:%M_{args.num_prototypes}{fname}{args.proto_size}")
     args.model_path = os.path.join("./experiments/train_results/", time_stmp, 'best_model.pth.tar')
-    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
 
     if 'train' in args.mode:
+        os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
         train(args, train_batches, val_batches, model)
+    if not os.path.exists(args.model_path):
+        load_path = "./experiments/train_results/*"
+        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        model_paths.sort()
+        args.model_path = model_paths[-1]
+    checkpoint = torch.load(args.model_path)
+    model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:
         test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches, labels_train, text_train, model)
     if 'finetune' in args.mode:
         finetune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
+    if 'prune' in args.mode:
+        prune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
