@@ -10,10 +10,15 @@ from transformers import BertForSequenceClassification
 class ProtoNet(nn.Module):
     def __init__(self, args):
         super(ProtoNet, self).__init__()
-
-        self.sentBert = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
-        self.enc_size = self.sentBert.get_sentence_embedding_dimension()
-        for param in self.sentBert.parameters():
+        self.language_model = args.language_model
+        if self.language_model == 'Bert':
+            self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
+            self.LM = BertModel.from_pretrained('bert-large-cased')
+            self.enc_size = self.LM.config.hidden_size
+        elif self.language_model == 'SentBert':
+            self.LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
+            self.enc_size = self.LM.get_sentence_embedding_dimension()
+        for param in self.LM.parameters():
             param.requires_grad = False
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, 1))),
                                                              requires_grad=True)
@@ -31,18 +36,31 @@ class ProtoNet(nn.Module):
         return self.fc.weight.T.cpu().detach().numpy()
 
     def compute_embedding(self, x, args):
-        embedding = self.sentBert.encode(x, convert_to_tensor=True, device=args.gpu[0])
-        if len(embedding.size()) == 1:
-            embedding.unsqueeze_(0)
+        if self.language_model == 'Bert':
+            bs = 10  # divide data by a batch size if too big for memory to process embedding at once
+            embedding = []
+            inputs = self.tokenizer(x, return_tensors="pt", padding=True, add_special_tokens=False)
+            for i in range(0, len(x), bs):
+                inputs_ = inputs.copy()
+                inputs_['input_ids'] = inputs_['input_ids'][i:i + bs].to(f'cuda:{args.gpu[0]}')
+                inputs_['attention_mask'] = inputs_['attention_mask'][i:i + bs].to(f'cuda:{args.gpu[0]}')
+                outputs = self.LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
+                embedding.extend(outputs[1].cpu()) # only post processed CLS token
+            embedding = torch.stack(embedding, dim=0)
+        elif self.language_model == 'SentBert':
+            embedding = self.LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu()
+            if len(embedding.size()) == 1:
+                embedding.unsqueeze_(0)
         return embedding
 
     @staticmethod
     def nearest_neighbors(distances, text_train, labels_train):
         distances = torch.cat(distances)
         _, nearest_ids = torch.topk(distances, 1, dim=0, largest=False)
-        proto_texts = [f"P{proto+1} | sentence {index} | label {labels_train[index]} | text: {text_train[index]}"
-                       for proto, sent in enumerate(nearest_ids.cpu().numpy().T) for index in sent]
-        return proto_texts
+        proto_id = [f"P{proto+1} | sentence {index} | label {labels_train[index]} | text: " for proto, sent
+                    in enumerate(nearest_ids.cpu().numpy().T) for index in sent]
+        proto_texts = [f"{text_train[index]}" for sent in nearest_ids.cpu().numpy().T for index in sent]
+        return proto_id, proto_texts
 
 
 class BaseNet(ProtoNet):
@@ -65,12 +83,11 @@ class ProtoPNet(nn.Module):
         if args.language_model == 'Bert':
             self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
             self.LM = BertModel.from_pretrained('bert-large-cased')
-            self.enc_size = 1024  # TODO: currently static instead of dynamic
         elif 'GPT2':
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2-xl')
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.LM = GPT2Model.from_pretrained('gpt2-xl')
-            self.enc_size = 1600  # TODO: currently static instead of dynamic
+        self.enc_size = self.LM.config.hidden_size
         for param in self.LM.parameters():
             param.requires_grad = False
         self.proto_size = args.proto_size
@@ -80,7 +97,7 @@ class ProtoPNet(nn.Module):
                 nn.Linear(in_features=self.enc_size, out_features=self.enc_size),
                 nn.ReLU()
                 )
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.proto_size, self.enc_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
 
     def get_proto_weights(self):
@@ -92,19 +109,15 @@ class ProtoPNet(nn.Module):
     def compute_embedding(self, x, args):
         bs = 10 # divide data by a batch size if too big for memory to process embedding at once
         word_embedding = []
-        inputs = self.tokenizer(x, return_tensors="pt", padding=True)
+        inputs = self.tokenizer(x, return_tensors="pt", padding=True, add_special_tokens=False)
         for i in range(0,len(x),bs):
             inputs_ = inputs.copy()
             inputs_['input_ids'] = inputs_['input_ids'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             inputs_['attention_mask'] = inputs_['attention_mask'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             outputs = self.LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
             if args.avoid_spec_token:
-                # setting embedding values of PAD, CLS and SEP token to a high number to make them "unlikely regarded"
-                # in distance computation
+                # set embedding values of PAD token to a high number to make it "unlikely regarded" in distance computation
                 inputs_['attention_mask'][inputs_['attention_mask']==0] = 1e3
-                for n in range(len(inputs_['attention_mask'])):
-                #     inputs_['attention_mask'][n][0] = 1e3
-                    inputs_['attention_mask'][n][inputs_['input_ids'][n]==102] = 1e3
                 word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
             else:
                 word_embedding.extend(outputs[0].cpu())
@@ -162,8 +175,8 @@ class ProtoPNetConv(ProtoPNet):
             nearest_conv.append(argmin_dist[n,i].cpu().numpy())
 
         # get text for prototypes
-        text_nearest, nearest_words, proto_texts = [], [], []
-        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
+        text_nearest, nearest_words, proto_texts, proto_ids = [], [], [], []
+        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True, add_special_tokens=False).input_ids
         j = 0
         for d, n in zip(self.dilated, self.num_filters):
             # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
@@ -174,44 +187,10 @@ class ProtoPNetConv(ProtoPNet):
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
             token2text = self.tokenizer.decode(text_nearest[i][w_indices].tolist())
-            proto_texts.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: {text_train[s_index]}")
+            proto_ids.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: ")
+            proto_texts.append(f"{text_train[s_index]}")
 
-        return proto_texts
-
-
-class ProtoPNetDist(ProtoPNet):
-    def __init__(self, args):
-        super(ProtoPNetDist, self).__init__(args)
-
-    def forward(self, embedding):
-        # embedding = self.emb_trafo(embedding)
-        distances = torch.cdist(embedding.unsqueeze(1), self.protolayer, p=2)
-        # pool along words per sentence, to get only #proto_size smallest distances per sentence and prototype
-        # and compute sum along this #proto_size to get only one distance value per sentence and prototype
-        min_distances = -F.max_pool2d(-distances, kernel_size=(distances.size(2), 1))
-        prototype_distances = torch.sum(torch.abs(min_distances), dim=-1).squeeze()
-        class_out = self.fc(prototype_distances)
-        return prototype_distances, distances, class_out
-
-    def nearest_neighbors(self, distances, text_train, labels_train):
-        distances = torch.cat(distances)
-        min_distances_per_sentence = -F.max_pool2d(-distances,
-                                      kernel_size=(distances.size(2),1))
-        min_distances_sent = torch.sum(torch.abs(min_distances_per_sentence), dim=-1)
-        # get argmin for number of protos along number of sentence dimension
-        nearest_sent = torch.argmin(min_distances_sent, dim=0).squeeze().cpu().numpy()
-
-        min_distances_word = -F.max_pool2d(-distances.permute(1,2,0,3),
-                                      kernel_size=(distances.size(0),1))
-        nearest_words = torch.argmin(min_distances_word, dim=1).squeeze().cpu().numpy()
-
-        proto_texts = []
-        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True).input_ids
-        for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
-            token2text = self.tokenizer.decode(text_tknzd[s_index][w_indices].tolist()) # TODO: bug that words are appended together
-            proto_texts.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: {text_train[s_index]}")
-
-        return proto_texts
+        return proto_ids, proto_texts
 
 
 class BasePartsNet(ProtoPNet):
