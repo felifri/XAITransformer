@@ -6,8 +6,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pickle
+import nltk
+words = set(nltk.corpus.words.words())
+
 
 # __import__("pdb").set_trace()
+
+def dist2similarity(distance):
+    return torch.exp(-distance)
+
+def prune_prototypes(proto_texts, model, args):
+    from nltk.corpus import stopwords
+    stop_words = set(stopwords.words('english'))
+    new_prototxts = []
+    for p in proto_texts:
+        new_prototxts.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words]))
+    new_prototypes = model.module.compute_embedding(new_prototxts, args).to(f'cuda:{args.gpu[0]}')
+    if len(new_prototypes.size())<3: new_prototypes.unsqueeze_(-1)
+    # only assign new prototypes if cosine similarity to old one is close
+    cos = torch.nn.CosineSimilarity()
+    angle = cos(model.module.protolayer, new_prototypes)
+    mask = (angle>0.85).squeeze()
+    return new_prototypes, new_prototxts, mask
 
 def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
         # visualize prototypes
@@ -21,7 +41,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
             tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
             [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
 
-        rnd_samples = np.random.randint(embed_trans.shape[0], size=500)
+        rnd_samples = np.random.randint(embed_trans.shape[0], size=1000)
         rnd_labels = [labels[i] for i in rnd_samples]
         rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
         fig = plt.figure()
@@ -42,7 +62,7 @@ def proto_loss(prototype_distances, label, model, args):
 
         # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
         # calculate cluster cost, high cost if same class protos are far distant
-        prototypes_of_correct_class = torch.t(args.prototype_class_identity[:, label]).to(f'cuda:{args.gpu[0]}')
+        prototypes_of_correct_class = torch.t(args.prototype_class_identity[:, label])
         inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=1)
         clust_loss = torch.mean(max_dist - inverted_distances)
         # assures that each sample is not too far distant form a prototype of its class
@@ -65,17 +85,6 @@ def proto_loss(prototype_distances, label, model, args):
         clust_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
         sep_loss = 0
 
-    # assures that each prototype itself does not consist out of the exact same input entry multiple times
-    dist_sum = 0
-    if args.modeltype == 'dist' and args.proto_size > 1:
-        comb = torch.combinations(torch.arange(args.proto_size), r=2)
-        for k, l in comb:
-            dist_sum += torch.dist(model.module.protolayer[:, k, :], model.module.protolayer[:, l, :], p=2)
-        # if distance small -> higher penalty
-        divers1_loss = - dist_sum / comb.size(0)
-    else:
-        divers1_loss = 0
-
     # diversity loss, assures that prototypes are not too close
     dist_sum = 0
     comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
@@ -83,9 +92,10 @@ def proto_loss(prototype_distances, label, model, args):
         # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
         # too far spread
         dist = torch.dist(model.module.protolayer[k, :, :], model.module.protolayer[l, :, :], p=2)
-        dist_sum += torch.maximum(torch.tensor(19), dist)
+        limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
+        dist_sum += torch.maximum(limit, dist)
     # if distance small -> higher penalty
-    divers2_loss = - dist_sum / comb.size(0)
+    divers_loss = - dist_sum / comb.size(0)
 
     if args.use_l1_mask:
         l1_mask = 1 - torch.t(args.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
@@ -93,7 +103,7 @@ def proto_loss(prototype_distances, label, model, args):
     else:
         l1_loss = model.module.fc.weight.norm(p=1)
 
-    return distr_loss, clust_loss, sep_loss, divers1_loss, divers2_loss, l1_loss
+    return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
 ####################################################
 ###### load toxicity data ##########################
@@ -204,6 +214,57 @@ def convert_label(labels):
             converted_labels.append(0)
     return converted_labels
 
+####################################################
+###### load restaurant review data #################
+####################################################
+
+def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    if file_dir is None:
+        dataset_file = os.path.join(set_dir, "yelp_academic_dataset_review.json")
+    else:
+        dataset_file = file_dir + "/yelp_academic_dataset_review.json"
+    assert os.path.isfile(dataset_file)
+    dataset = pd.read_json(dataset_file, lines=True)
+    text = dataset['text'].tolist()
+    labels = dataset['stars'].tolist()
+    assert len(text) == len(labels)
+
+    if remove_long:
+        labels = list([l for t, l in zip(text, labels) if len(t.split())<=25])
+        text = list([t for t in text if len(t.split())<=25])
+
+    if args.discard:
+        text = list([t for t, l in zip(text, labels) if (l <= 1.0 or l >= 5.0)])
+        labels = list([l for l in labels if (l <= 1.0 or l >= 5.0)])
+
+    if binary:
+        labels = list([0 if l < 2.5 else 1 for l in labels])
+
+    # remove non english words (some reviews in Chinese, etc.)
+    for i,t in enumerate(text):
+        text[i] = convert_language(t)
+        if not text[i]:
+            del text[i]
+            del labels[i]
+
+    assert len(text) == len(labels)
+    max_len = 250_000
+    if len(text)> max_len:
+        text = [text[i] for i in range(max_len)]
+        labels = [labels[i] for i in range(max_len)]
+    pickle.dump(text, open(set_dir + '/text.pkl', 'wb'))
+    pickle.dump(labels, open(set_dir + '/labels.pkl', 'wb'))
+    return text, labels
+
+def convert_language(seq):
+    return " ".join(w for w in nltk.wordpunct_tokenize(seq) if w.lower() in words and w.isalpha())
+
+def get_restaurant(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    text = pickle.load(open(set_dir + '/text.pkl', 'rb'))
+    labels = pickle.load(open(set_dir + '/labels.pkl', 'rb'))
+    return text, labels
 
 ####################################################
 ###### main loading function #######################
@@ -218,6 +279,8 @@ def load_data(args, file_dir=None):
         texts, labels = parse_full('toxicity', discard=args.discard, file_dir=file_dir)
     elif tag == 'rt-polarity':
         texts, labels = get_reviews(args)
+    elif tag == 'restaurant':
+        texts, labels = get_restaurant(args)
     return texts, labels
 
 
