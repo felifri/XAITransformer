@@ -12,7 +12,7 @@ from tqdm import tqdm
 from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoNet
-from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes
+from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, get_nearest
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="train test", type=str, nargs='+',
@@ -35,7 +35,7 @@ parser.add_argument('-l1','--lambda1', default=0.02, type=float,
                     help='Weight for prototype distribution loss')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype cluster loss')
-parser.add_argument('-l3','--lambda3', default=0.02, type=float,
+parser.add_argument('-l3','--lambda3', default=0.01, type=float,
                     help='Weight for prototype separation loss')
 parser.add_argument('-l4','--lambda4', default=0.01, type=float,
                     help='Weight for wihtin prototype diversity loss')
@@ -68,7 +68,7 @@ parser.add_argument('--query', type=str, default='you are a faggot', nargs='+',
 
 def train(args, train_batches, val_batches, model):
     num_epochs = args.num_epochs
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
 
     print(f"\nStart training for {num_epochs} epochs\n")
@@ -209,15 +209,9 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         acc_test = balanced_accuracy_score(all_labels, all_preds)
         print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
-        dist = []
-        for batch, _ in train_batches:
-            batch = batch.to(f'cuda:{args.gpu[0]}')
-            _, distances, _ = model.forward(batch)
-            dist.append(distances)
-
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_ids, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
-        weights = model.module.get_proto_weights()
+        proto_ids, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+        weights = model.get_proto_weights()
 
         if os.path.basename(args.model_path).startswith('finetuned'):
             fname = "finetuned_prototypes.txt"
@@ -241,7 +235,7 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         txt_file.close()
 
         # plot prototypes
-        prototypes = model.module.get_protos().cpu().numpy()
+        prototypes = model.get_protos().cpu().numpy()
         if len(embedding_train.shape) == 2:
             visualize_protos(embedding_train.cpu().numpy(), labels_train, prototypes, n_components=2, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
             # visualize_protos(embedding_train.cpu().numpy(), labels_train, prototypes, n_components=3, trans_type=args.trans_type, save_path=os.path.dirname(save_path))
@@ -251,25 +245,18 @@ def query(args, train_batches, labels_train, text_train, model):
     print("\nEvaluate query, loading model:", args.model_path)
     model.eval()
 
-    embedding_query = model.module.compute_embedding(args.query, args)
+    embedding_query = model.compute_embedding(args.query, args)
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
-    dist = []
-    with torch.no_grad():
-        for batch, _ in train_batches:
-            batch = batch.to(f'cuda:{args.gpu[0]}')
-            _, distances, _ = model.forward(batch)
-            dist.append(distances)
-
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_ids, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
+    proto_ids, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
     proto_texts = [id+txt for id, txt in zip(proto_ids,proto_texts)]
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
     predicted = torch.argmax(predicted_label).cpu()
 
     query2proto = torch.argmin(distances)
     nearest_proto = proto_texts[query2proto]
-    weights = model.module.get_proto_weights()
+    weights = model.get_proto_weights()
 
     save_path = os.path.join(os.path.dirname(args.model_path), "query.txt")
     txt_file = open(save_path, "w+")
@@ -289,21 +276,20 @@ def finetune(args, train_batches, val_batches, embedding_train, test_batches, la
     print("\nRetrain, loading model:", args.model_path)
 
     # protos2keep = list(map(int,input("Select prototypes to keep: ").split()))
-    protos2keep = [1,5,6]
+    protos2keep = [0,1,2,3,7,9]
     if not protos2keep:
         protos2keep = list(range(args.num_prototypes))
 
-    # if mode == 'weights':
-    # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
-    gradient_mask_fc = torch.ones(model.module.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
-    gradient_mask_fc[:,protos2keep] = 0
-    model.module.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+    # # if mode == 'weights':
+    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
+    # gradient_mask_fc = torch.ones(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+    # gradient_mask_fc[:,protos2keep] = 0
+    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
     # if mode == 'prototypes':
     # also, do not update the selected prototypes that should be kept
-    gradient_mask_proto = torch.ones(model.module.protolayer.size()).to(f'cuda:{args.gpu[0]}')
+    gradient_mask_proto = torch.ones(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
     gradient_mask_proto[protos2keep, :, :] = 0
-    model.module.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
-
+    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'finetuned_best_model.pth.tar')
     train(args, train_batches, val_batches, model)
     test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
@@ -311,19 +297,13 @@ def finetune(args, train_batches, val_batches, embedding_train, test_batches, la
 
 def prune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
     print("\nPrune, loading model:", args.model_path)
-    model.eval()
-    dist = []
-    for batch, _ in train_batches:
-        batch = batch.to(f'cuda:{args.gpu[0]}')
-        _, distances, _ = model.forward(batch)
-        dist.append(distances)
-    _, proto_texts = model.module.nearest_neighbors(dist, text_train, labels_train)
+    _, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
 
     # prune prototypes by removing stop words
     new_prototypes, _, mask = prune_prototypes(proto_texts, model, args)
     # assign new prototypes and don't update them when retraining
-    model.module.protolayer.data[mask] = new_prototypes[mask]
-    model.module.protolayer.requires_grad = False
+    model.protolayer.data[mask] = new_prototypes[mask]
+    model.protolayer.requires_grad = False
 
     # update model with new parameters (prototypes)
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'pruned_best_model.pth.tar')
@@ -338,8 +318,13 @@ def prune(args, train_batches, val_batches, embedding_train, test_batches, label
 #     print("\nAdjust, loading model:", args.model_path)
 #     # remove prototypes
 #     protos2remove = [1,5,6]
-#     model.module.fc
-#     self.fc.weight.T.cpu().detach().numpy()
+#     model.fc.weight.data[:, protos2remove] = 0
+#     gradient_mask_fc = torch.ones(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+#     gradient_mask_fc[:, protos2remove] = 0
+#     model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+#     gradient_mask_proto = torch.ones(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
+#     gradient_mask_proto[protos2remove, :, :] = 0
+#     model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
 #     # add prototypes
 
 
@@ -387,8 +372,6 @@ if __name__ == '__main__':
         model = ProtoNet(args)
 
     print(f"Running on gpu {args.gpu}")
-    model = torch.nn.DataParallel(model, device_ids=args.gpu)
-    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
 
     avoid = ''
@@ -401,9 +384,9 @@ if __name__ == '__main__':
         embedding_val = load_embedding(args, fname, 'val' + avoid)
         embedding_test = load_embedding(args, fname, 'test' + avoid)
     else:
-        embedding_train = model.module.compute_embedding(text_train, args)
-        embedding_val = model.module.compute_embedding(text_val, args)
-        embedding_test = model.module.compute_embedding(text_test, args)
+        embedding_train = model.compute_embedding(text_train, args)
+        embedding_val = model.compute_embedding(text_val, args)
+        embedding_test = model.compute_embedding(text_test, args)
         save_embedding(embedding_train, args, fname, 'train' + avoid)
         save_embedding(embedding_val, args, fname, 'val' + avoid)
         save_embedding(embedding_test, args, fname, 'test' + avoid)

@@ -15,17 +15,27 @@ words = set(nltk.corpus.words.words())
 def dist2similarity(distance):
     return torch.exp(-distance)
 
+def get_nearest(args, model, train_batches, text_train, labels_train):
+    model.eval()
+    dist = []
+    for batch, _ in train_batches:
+        batch = batch.to(f'cuda:{args.gpu[0]}')
+        _, distances, _ = model.forward(batch)
+        dist.append(distances)
+    proto_ids, proto_texts = model.nearest_neighbors(dist, text_train, labels_train)
+    return proto_ids, proto_texts
+
 def prune_prototypes(proto_texts, model, args):
     from nltk.corpus import stopwords
     stop_words = set(stopwords.words('english'))
     new_prototxts = []
     for p in proto_texts:
         new_prototxts.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words]))
-    new_prototypes = model.module.compute_embedding(new_prototxts, args).to(f'cuda:{args.gpu[0]}')
+    new_prototypes = model.compute_embedding(new_prototxts, args).to(f'cuda:{args.gpu[0]}')
     if len(new_prototypes.size())<3: new_prototypes.unsqueeze_(-1)
     # only assign new prototypes if cosine similarity to old one is close
     cos = torch.nn.CosineSimilarity()
-    angle = cos(model.module.protolayer, new_prototypes)
+    angle = cos(model.protolayer, new_prototypes)
     mask = (angle>0.85).squeeze()
     return new_prototypes, new_prototxts, mask
 
@@ -58,7 +68,7 @@ def visualize_protos(embedding, labels, prototypes, n_components, trans_type, sa
 
 def proto_loss(prototype_distances, label, model, args):
     if args.class_specific:
-        max_dist = torch.prod(torch.tensor(model.module.protolayer.size())) # proxy variable, could be any high value
+        max_dist = torch.prod(torch.tensor(model.protolayer.size())) # proxy variable, could be any high value
 
         # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
         # calculate cluster cost, high cost if same class protos are far distant
@@ -91,7 +101,7 @@ def proto_loss(prototype_distances, label, model, args):
     for k, l in comb:
         # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
         # too far spread
-        dist = torch.dist(model.module.protolayer[k, :, :], model.module.protolayer[l, :, :], p=2)
+        dist = torch.dist(model.protolayer[k, :, :], model.protolayer[l, :, :], p=2)
         limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
         dist_sum += torch.maximum(limit, dist)
     # if distance small -> higher penalty
@@ -99,9 +109,9 @@ def proto_loss(prototype_distances, label, model, args):
 
     if args.use_l1_mask:
         l1_mask = 1 - torch.t(args.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
-        l1_loss = (model.module.fc.weight * l1_mask).norm(p=1)
+        l1_loss = (model.fc.weight * l1_mask).norm(p=1)
     else:
-        l1_loss = model.module.fc.weight.norm(p=1)
+        l1_loss = model.fc.weight.norm(p=1)
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
@@ -245,8 +255,7 @@ def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
     for i,t in enumerate(text):
         text[i] = convert_language(t)
         if not text[i]:
-            del text[i]
-            del labels[i]
+            del text[i], labels[i]
 
     assert len(text) == len(labels)
     max_len = 250_000
