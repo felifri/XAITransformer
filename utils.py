@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 from sklearn.decomposition import PCA
 from MulticoreTSNE import MulticoreTSNE as TSNE
 import matplotlib.pyplot as plt
@@ -7,13 +8,63 @@ import numpy as np
 import pandas as pd
 import pickle
 import nltk
+from nltk.corpus import stopwords
+import string
 words = set(nltk.corpus.words.words())
+cos = nn.CosineSimilarity()
 
 
 # __import__("pdb").set_trace()
 
 def dist2similarity(distance):
+    # turn distance to similarity. if distance is small we have value 1, if distance is infinity we have 0
     return torch.exp(-distance)
+
+def add_prototypes(args, protos2add, model):
+    # reassign protolayer, add new ones
+    protos2add = model.compute_emb(protos2add, args)
+    protos2add = protos2add.view(-1, model.enc_size, 1)
+    new_protos = torch.cat((model.protolayer.data,protos2add))
+    model.protolayer = nn.Parameter(new_protos,requires_grad=False)
+    # reassign last layer, add new ones
+    weights2keep = model.fc.data.detach().clone()
+    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False)
+    new_weights = nn.init.uniform_(torch.empty((len(protos2add), args.num_classes)))
+    model.fc.data = torch.cat((weights2keep, new_weights))
+    args.num_prototypes = args.num_prototypes + len(protos2add)
+    model.num_prototypes = args.num_prototypes
+    if model.dilated:
+        model.num_filters = [model.num_prototypes // len(model.dilated)] * len(model.dilated)
+        model.num_filters[0] += model.num_prototypes % len(model.dilated)
+    args.prototype_class_identity = args.prototype_class_identity[:args.num_prototypes, :]
+    return model
+
+def remove_prototypes(args, protos2remove, model, use_cos=False):
+    if use_cos:
+        comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
+        for k, l in comb:
+            # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
+            # too far spread
+            similarity = cos(model.protolayer[k, :, :], model.protolayer[l, :, :])
+            similarity = torch.sum(similarity) / args.proto_size
+            if similarity>0.9:
+                protos2remove.append(int(k))
+
+    # make list items unique
+    protos2remove = list(set(protos2remove))
+    protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
+    # reassign protolayer, remove unneeded ones and only keep useful ones
+    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=False)
+    weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
+    model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
+    model.fc.weight.data = weights2keep
+    args.num_prototypes = args.num_prototypes - len(protos2remove)
+    model.num_prototypes = args.num_prototypes
+    if model.dilated:
+        model.num_filters = [model.num_prototypes // len(model.dilated)] * len(model.dilated)
+        model.num_filters[0] += model.num_prototypes % len(model.dilated)
+    args.prototype_class_identity =  args.prototype_class_identity[:args.num_prototypes,:]
+    return model
 
 def get_nearest(args, model, train_batches, text_train, labels_train):
     model.eval()
@@ -26,45 +77,69 @@ def get_nearest(args, model, train_batches, text_train, labels_train):
     return proto_ids, proto_texts
 
 def prune_prototypes(proto_texts, model, args):
-    from nltk.corpus import stopwords
-    stop_words = set(stopwords.words('english'))
+    # define stop words, but e.g. 'not' should not be removed
+    stop_words = set(stopwords.words('english')) - {'not', 'no'}
     new_prototxts = []
+    # remove stop words, non alpha words and single character words, also remove punctuation
     for p in proto_texts:
-        new_prototxts.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words]))
+        p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
+        new_prototxts.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words and len(w)>1]))
     new_prototypes = model.compute_embedding(new_prototxts, args).to(f'cuda:{args.gpu[0]}')
     if len(new_prototypes.size())<3: new_prototypes.unsqueeze_(-1)
     # only assign new prototypes if cosine similarity to old one is close
-    cos = torch.nn.CosineSimilarity()
     angle = cos(model.protolayer, new_prototypes)
     mask = (angle>0.85).squeeze()
+    # further reduce length if possible
+    for i in range(args.num_prototypes):
+        new_prototxts_ = " ".join(new_prototxts[i].split()[0:4])
+        new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
+        angle_ = cos(model.protolayer[i].T, new_prototypes_)
+        if angle_>0.85:
+            new_prototxts[i] = new_prototxts_
+            new_prototypes[i] = new_prototypes_.T
     return new_prototypes, new_prototxts, mask
 
-def visualize_protos(embedding, labels, prototypes, n_components, trans_type, save_path):
+def visualize_protos(args, embedding, labels, prototypes, n_components=2):
         # visualize prototypes
-        if trans_type == 'PCA':
+        if args.trans_type == 'PCA':
             pca = PCA(n_components=n_components)
             pca.fit(embedding)
             print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
             embed_trans = pca.transform(embedding)
             proto_trans = pca.transform(prototypes)
-        elif trans_type == 'TSNE':
+        elif args.trans_type == 'TSNE':
             tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
             [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
 
         rnd_samples = np.random.randint(embed_trans.shape[0], size=1000)
         rnd_labels = [labels[i] for i in rnd_samples]
-        rnd_labels = ['green' if x == 1 else 'red' for x in rnd_labels]
+        cdict_d = {0:'red', 1:'green'}
+        ldict_d = {0:'data_neg', 1:'data_pos'}
+        cdict_p = {0:'blue', 1:'orange'}
+        ldict_p = {0:'proto_neg', 1:'proto_pos'}
         fig = plt.figure()
         if n_components==2:
             ax = fig.add_subplot(111)
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],c=rnd_labels,marker='x', label='data')
-            ax.scatter(proto_trans[:,0],proto_trans[:,1],c='blue',marker='o',label='prototypes')
+            for cl in range(args.num_classes):
+                ix = np.where(np.array(rnd_labels) == cl)
+                ax.scatter(embed_trans[ix,0],embed_trans[ix,1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+                ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
+                ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
+            for i in range(args.num_prototypes):
+                txt = "P" + str(i + 1)
+                ax.annotate(txt, (proto_trans[i, 0], proto_trans[i, 1]), color='black')
         elif n_components==3:
             ax = fig.add_subplot(111, projection='3d')
-            ax.scatter(embed_trans[rnd_samples,0],embed_trans[rnd_samples,1],embed_trans[rnd_samples,2],c=rnd_labels,marker='x', label='data')
-            ax.scatter(proto_trans[:,0],proto_trans[:,1],proto_trans[:,2],c='blue',marker='o',label='prototypes')
+            for cl in range(args.num_classes):
+                ix = np.where(np.array(rnd_labels) == cl)
+                ax.scatter(embed_trans[ix,0],embed_trans[ix,1],embed_trans[ix,2],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+                ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
+                ax.scatter(proto_trans[ix,0],proto_trans[ix,1],proto_trans[ix,2],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
+            for i in range(args.num_prototypes):
+                txt = "P" + str(i+1)
+                ax.annotate(txt, (proto_trans[i,0],proto_trans[i,1],proto_trans[i,2]), color='black')
         ax.legend()
-        fig.savefig(os.path.join(save_path, trans_type+'proto_vis'+str(n_components)+'d.png'))
+        fig.savefig(os.path.join(os.path.dirname(args.model_path), args.trans_type+'proto_vis'+str(n_components)+'d.png'))
 
 def proto_loss(prototype_distances, label, model, args):
     if args.class_specific:
@@ -104,14 +179,15 @@ def proto_loss(prototype_distances, label, model, args):
         dist = torch.dist(model.protolayer[k, :, :], model.protolayer[l, :, :], p=2)
         limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
         dist_sum += torch.maximum(limit, dist)
+        # dist_sum += cos(model.protolayer[k, :, :], model.protolayer[l, :, :])
     # if distance small -> higher penalty
     divers_loss = - dist_sum / comb.size(0)
 
     if args.use_l1_mask:
         l1_mask = 1 - torch.t(args.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
-        l1_loss = (model.fc.weight * l1_mask).norm(p=1)
+        l1_loss = (model.fc.weight.data * l1_mask).norm(p=1)
     else:
-        l1_loss = model.fc.weight.norm(p=1)
+        l1_loss = model.fc.weight.data.norm(p=1)
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
