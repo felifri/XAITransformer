@@ -8,3 +8,4 @@ pandas == 1.0.3
 multicoretsne == 0.1
 rtpt
 tqdm
+nltk
