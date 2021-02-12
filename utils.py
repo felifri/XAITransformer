@@ -20,6 +20,26 @@ def dist2similarity(distance):
     # turn distance to similarity. if distance is small we have value 1, if distance is infinity we have 0
     return torch.exp(-distance)
 
+def finetune_prototypes(args, protos2finetune, model):
+    # # if mode == 'weights':
+    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
+    # gradient_mask_fc = torch.zeros(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+    # gradient_mask_fc[:,protos2finetune] = 1
+    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+    # if mode == 'prototypes':
+    # also, do not update the selected prototypes which should be kept
+    gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
+    gradient_mask_proto[protos2finetune, :, :] = 1
+    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
+    return model
+
+def reinit_prototypes(args, protos2reinit, model):
+    # reinitialize selected prototypes
+    model.protolayer.data[protos2reinit,:] = nn.init.uniform_(torch.empty(model.protolayer.size()))[protos2reinit,:]
+    # onyl retrain reinitialized protos and set gradients of other prototypes to zero
+    model = finetune_prototypes(args, protos2reinit, model)
+    return model
+
 def add_prototypes(args, protos2add, model):
     # reassign protolayer, add new ones
     protos2add = model.compute_emb(protos2add, args)
@@ -32,12 +52,8 @@ def add_prototypes(args, protos2add, model):
     new_weights = nn.init.uniform_(torch.empty((len(protos2add), args.num_classes)))
     model.fc.data = torch.cat((weights2keep, new_weights))
     args.num_prototypes = args.num_prototypes + len(protos2add)
-    model.num_prototypes = args.num_prototypes
-    if model.dilated:
-        model.num_filters = [model.num_prototypes // len(model.dilated)] * len(model.dilated)
-        model.num_filters[0] += model.num_prototypes % len(model.dilated)
-    args.prototype_class_identity = args.prototype_class_identity[:args.num_prototypes, :]
-    return model
+    args, model = update_params(args, model)
+    return args, model
 
 def remove_prototypes(args, protos2remove, model, use_cos=False):
     if use_cos:
@@ -59,12 +75,16 @@ def remove_prototypes(args, protos2remove, model, use_cos=False):
     model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
     model.fc.weight.data = weights2keep
     args.num_prototypes = args.num_prototypes - len(protos2remove)
+    args, model = update_params(args, model)
+    return args, model
+
+def update_params(args, model):
     model.num_prototypes = args.num_prototypes
-    if model.dilated:
-        model.num_filters = [model.num_prototypes // len(model.dilated)] * len(model.dilated)
-        model.num_filters[0] += model.num_prototypes % len(model.dilated)
+    if args.dilated:
+        model.num_filters = [model.num_prototypes // len(args.dilated)] * len(args.dilated)
+        model.num_filters[0] += model.num_prototypes % len(args.dilated)
     args.prototype_class_identity =  args.prototype_class_identity[:args.num_prototypes,:]
-    return model
+    return args, model
 
 def get_nearest(args, model, train_batches, text_train, labels_train):
     model.eval()
@@ -76,28 +96,40 @@ def get_nearest(args, model, train_batches, text_train, labels_train):
     proto_ids, proto_texts = model.nearest_neighbors(dist, text_train, labels_train)
     return proto_ids, proto_texts
 
-def prune_prototypes(proto_texts, model, args):
+def prune_prototypes(args, proto_texts, model):
     # define stop words, but e.g. 'not' should not be removed
     stop_words = set(stopwords.words('english')) - {'not', 'no'}
-    new_prototxts = []
-    # remove stop words, non alpha words and single character words, also remove punctuation
+    pruned_protos = []
+
+    # remove stop words, non alpha words, single character words and punctuation
     for p in proto_texts:
         p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
-        new_prototxts.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words and len(w)>1]))
-    new_prototypes = model.compute_embedding(new_prototxts, args).to(f'cuda:{args.gpu[0]}')
+        pruned_protos.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words and len(w)>1]))
+    new_prototypes = model.compute_embedding(pruned_protos, args).to(f'cuda:{args.gpu[0]}')
     if len(new_prototypes.size())<3: new_prototypes.unsqueeze_(-1)
     # only assign new prototypes if cosine similarity to old one is close
     angle = cos(model.protolayer, new_prototypes)
     mask = (angle>0.85).squeeze()
+
     # further reduce length if possible
     for i in range(args.num_prototypes):
-        new_prototxts_ = " ".join(new_prototxts[i].split()[0:4])
+        if len(pruned_protos[i])>4:
+            new_prototxts_ = " ".join(pruned_protos[i].split()[0:4])
+        else:
+            new_prototxts_ = pruned_protos[i]
         new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
         angle_ = cos(model.protolayer[i].T, new_prototypes_)
         if angle_>0.85:
-            new_prototxts[i] = new_prototxts_
+            pruned_protos[i] = new_prototxts_
             new_prototypes[i] = new_prototypes_.T
-    return new_prototypes, new_prototxts, mask
+
+    # mask: replace only words with high cos sim
+    for i,m in enumerate(mask):
+        if m: proto_texts[i] = pruned_protos[i]
+    # assign new prototypes and don't update them when retraining
+    model.protolayer.data[mask] = new_prototypes[mask]
+    model.protolayer.requires_grad = False
+    return model, proto_texts
 
 def visualize_protos(args, embedding, labels, prototypes, n_components=2):
         # visualize prototypes
@@ -110,7 +142,6 @@ def visualize_protos(args, embedding, labels, prototypes, n_components=2):
         elif args.trans_type == 'TSNE':
             tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
             [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
-
         rnd_samples = np.random.randint(embed_trans.shape[0], size=1000)
         rnd_labels = [labels[i] for i in rnd_samples]
         cdict_d = {0:'red', 1:'green'}
@@ -122,7 +153,7 @@ def visualize_protos(args, embedding, labels, prototypes, n_components=2):
             ax = fig.add_subplot(111)
             for cl in range(args.num_classes):
                 ix = np.where(np.array(rnd_labels) == cl)
-                ax.scatter(embed_trans[ix,0],embed_trans[ix,1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+                ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
                 ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
                 ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
             for i in range(args.num_prototypes):
@@ -132,7 +163,7 @@ def visualize_protos(args, embedding, labels, prototypes, n_components=2):
             ax = fig.add_subplot(111, projection='3d')
             for cl in range(args.num_classes):
                 ix = np.where(np.array(rnd_labels) == cl)
-                ax.scatter(embed_trans[ix,0],embed_trans[ix,1],embed_trans[ix,2],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+                ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],embed_trans[rnd_samples[ix],2],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
                 ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
                 ax.scatter(proto_trans[ix,0],proto_trans[ix,1],proto_trans[ix,2],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
             for i in range(args.num_prototypes):

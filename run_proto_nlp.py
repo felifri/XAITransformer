@@ -12,11 +12,13 @@ from tqdm import tqdm
 from rtpt import RTPT
 
 from models import ProtoPNetConv, ProtoNet
-from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, get_nearest, remove_prototypes, add_prototypes
+from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
+    get_nearest, remove_prototypes, add_prototypes, reinit_prototypes
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('-m', '--mode', default="train test", type=str, nargs='+',
-                    help='What do you want to do? Select either any combination of train, test, query, finetune, prune, adjust')
+                    help='What do you want to do? Select either any combination of train, test, query, finetune, prune, '
+                         'add, remove, reinitialize.')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -113,7 +115,7 @@ def train(args, train_batches, val_batches, model):
             loss.backward()
             optimizer.step()
             # with torch.no_grad():
-            #     model.fc.weight.copy_(model.fc.weight.data.clamp(max=0))
+            #     model.fc.weight.copy_(model.fc.weight.data.clamp(max=0.5))
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -215,13 +217,10 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         proto_ids, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
         weights = model.get_proto_weights()
 
-        if os.path.basename(args.model_path).startswith('finetuned'):
-            fname = "finetuned_prototypes.txt"
-        elif os.path.basename(args.model_path).startswith('adjusted'):
-            fname = "adjusted_prototypes.txt"
-        elif os.path.basename(args.model_path).startswith('pruned'):
-            fname = "pruned_prototypes.txt"
-            proto_texts = pruned_text
+        if os.path.basename(args.model_path).startswith('interacted'):
+            fname = "interacted_prototypes.txt"
+            if 'prune' in args.mode:
+                proto_texts = pruned_text
         else:
             fname = "prototypes.txt"
         proto_texts = [id_ + txt for id_, txt in zip(proto_ids, proto_texts)]
@@ -239,11 +238,12 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
 
         # plot prototypes
         prototypes = model.get_protos().cpu().numpy()
-        if len(embedding_train.shape) == 3:
-            embedding_train = embedding_train.view(-1,model.enc_size)
+        if len(embedding_train.shape) == 2:
+            visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, n_components=2)
+        # elif len(embedding_train.shape) == 3:
+            # embedding_train = embedding_train.view(-1,model.enc_size)
             # prototypes = prototypes.view(-1,model.enc_size)
-            prototypes = prototypes[:,0,:] # TODO: not yet correct, only takes the first word instead of all words
-        visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, n_components=2)
+            # prototypes = prototypes[:,0,:] #TODO: not yet correct, only takes the first word instead of all words
         # visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, n_components=3)
 
 
@@ -278,71 +278,39 @@ def query(args, train_batches, labels_train, text_train, model):
     txt_file.close()
 
 
-def finetune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
-    print("\nRetrain, loading model:", args.model_path)
+def interact(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
+    print("\nInteract, loading model:", args.model_path)
+    if 'remove' in args.mode:
+        # protos2remove = list(map(int,input("Select prototypes to remove: ").split()))
+        protos2remove = [0,2]
+        args, model = remove_prototypes(args, protos2remove, model, use_cos=False)
 
-    # protos2keep = list(map(int,input("Select prototypes to keep: ").split()))
-    protos2keep = [1,2,4,5]
-    if not protos2keep:
-        protos2keep = list(range(args.num_prototypes))
+    if 'add' in args.mode:
+        protos2add = []
+        # protos2add = list(map(int,input("Select prototypes to add: ").split()))
+        args, model = add_prototypes(args, protos2add, model)
 
-    # # if mode == 'weights':
-    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
-    # gradient_mask_fc = torch.ones(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
-    # gradient_mask_fc[:,protos2keep] = 0
-    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
-    # if mode == 'prototypes':
-    # also, do not update the selected prototypes which should be kept
-    gradient_mask_proto = torch.ones(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
-    gradient_mask_proto[protos2keep, :, :] = 0
-    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
-    args.model_path = os.path.join(os.path.dirname(args.model_path), 'finetuned_best_model.pth.tar')
-    train(args, train_batches, val_batches, model)
-    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
+    if 'reinitialize' in args.mode:
+        protos2reinit = []
+        # protos2retrain = list(map(int,input("Select prototypes to retrain: ").split()))
+        model = reinit_prototypes(args, protos2reinit, model)
 
+    if 'finetune' in args.mode:
+        protos2finetune = []
+        # protos2finetune = list(map(int,input("Select prototypes to finetune: ").split()))
+        model = finetune_prototypes(args, protos2finetune, model)
 
-def prune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
-    print("\nPrune, loading model:", args.model_path)
-    _, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+    pruned_protos = []
+    if 'prune' in args.mode:
+        _, protos2prune = get_nearest(args, model, train_batches, text_train, labels_train)
+        # protos2prune = list(map(int,input("Select prototypes to prune: ").split()))
+        model, pruned_protos = prune_prototypes(args, protos2prune, model)
 
-    # prune prototypes by removing stop words
-    new_prototypes, new_proto_texts, mask = prune_prototypes(proto_texts, model, args)
-    # mask: replace only words with high cos sim
-    for i, m in enumerate(mask):
-        if m: proto_texts[i] = new_proto_texts[i]
-    # assign new prototypes and don't update them when retraining
-    model.protolayer.data[mask] = new_prototypes[mask]
-    model.protolayer.requires_grad = False
-
-    # update model with new parameters (prototypes)
-    args.model_path = os.path.join(os.path.dirname(args.model_path), 'pruned_best_model.pth.tar')
-    # state = { 'state_dict': model.state_dict(), 'hyper_params': args}
-    # torch.save(state, args.model_path)
-    # retrain network, only retrain last layer (fc)
-    train(args, train_batches, val_batches, model)
-    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model, new_proto_texts)
-
-
-def adjust(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
-    print("\nAdjust, loading model:", args.model_path)
-    # remove prototypes
-    # protos2remove = list(map(int,input("Select prototypes to remove: ").split()))
-    protos2remove = [0,2]
-    if protos2remove:
-        model = remove_prototypes(args, protos2remove, model, use_cos=False)
-    # add prototypes
-    protos2add = []
-    # protos2add = list(map(int,input("Select prototypes to add: ").split()))
-    if protos2add:
-        model = add_prototypes(args, protos2add, model)
     # save changed model
-    args.model_path = os.path.join(os.path.dirname(args.model_path), 'adjusted_best_model.pth.tar')
-    # TODO: do I need to save in the dict?
-    # state = { 'state_dict': model.state_dict(), 'hyper_params': args}
-    # torch.save(state, args.model_path)
+    args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain network, only retrain last layer (fc)
     train(args, train_batches, val_batches, model)
-    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
+    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model, pruned_protos)
 
 
 if __name__ == '__main__':
@@ -434,9 +402,6 @@ if __name__ == '__main__':
         test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches, labels_train, text_train, model)
-    if 'finetune' in args.mode:
-        finetune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
-    if 'prune' in args.mode:
-        prune(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
-    if 'adjust' in args.mode:
-        adjust(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
+    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
+            or 'prune' in args.mode:
+        interact(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
