@@ -6,18 +6,16 @@ from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model
 import transformers
 import logging
 from transformers import BertForSequenceClassification
+# from utils import dist2similarity
+
 
 class ProtoNet(nn.Module):
     def __init__(self, args):
         super(ProtoNet, self).__init__()
         self.language_model = args.language_model
-        if self.language_model == 'Bert':
-            self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
-            self.LM = BertModel.from_pretrained('bert-large-cased')
-            self.enc_size = self.LM.config.hidden_size
-        elif self.language_model == 'SentBert':
-            self.LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
-            self.enc_size = self.LM.get_sentence_embedding_dimension()
+        self.num_prototypes = args.num_prototypes
+        self.LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
+        self.enc_size = self.LM.get_sentence_embedding_dimension()
         for param in self.LM.parameters():
             param.requires_grad = False
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, 1))),
@@ -26,6 +24,8 @@ class ProtoNet(nn.Module):
 
     def forward(self, embedding):
         prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
+        # similarity = dist2similarity(prototype_distances)
+        # class_out = self.fc(similarity)
         class_out = self.fc(prototype_distances)
         return prototype_distances, prototype_distances, class_out
 
@@ -36,21 +36,9 @@ class ProtoNet(nn.Module):
         return self.fc.weight.T.cpu().detach().numpy()
 
     def compute_embedding(self, x, args):
-        if self.language_model == 'Bert':
-            bs = 10  # divide data by a batch size if too big for memory to process embedding at once
-            embedding = []
-            inputs = self.tokenizer(x, return_tensors="pt", padding=True, add_special_tokens=False)
-            for i in range(0, len(x), bs):
-                inputs_ = inputs.copy()
-                inputs_['input_ids'] = inputs_['input_ids'][i:i + bs].to(f'cuda:{args.gpu[0]}')
-                inputs_['attention_mask'] = inputs_['attention_mask'][i:i + bs].to(f'cuda:{args.gpu[0]}')
-                outputs = self.LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
-                embedding.extend(outputs[1].cpu()) # only post processed CLS token
-            embedding = torch.stack(embedding, dim=0)
-        elif self.language_model == 'SentBert':
-            embedding = self.LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu()
-            if len(embedding.size()) == 1:
-                embedding.unsqueeze_(0)
+        embedding = self.LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu()
+        if len(embedding.size()) == 1:
+            embedding.unsqueeze_(0)
         return embedding
 
     @staticmethod
@@ -85,13 +73,13 @@ class ProtoPNet(nn.Module):
             self.LM = BertModel.from_pretrained('bert-large-cased')
         elif 'GPT2':
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2-xl')
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             self.LM = GPT2Model.from_pretrained('gpt2-xl')
         self.enc_size = self.LM.config.hidden_size
         for param in self.LM.parameters():
             param.requires_grad = False
         self.proto_size = args.proto_size
-        self.num_protos = args.num_prototypes
+        self.num_prototypes = args.num_prototypes
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
         self.emb_trafo = nn.Sequential(
                 nn.Linear(in_features=self.enc_size, out_features=self.enc_size),
@@ -130,8 +118,8 @@ class ProtoPNetConv(ProtoPNet):
         super(ProtoPNetConv, self).__init__(args)
         self.ones = nn.Parameter(torch.ones(args.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
         self.dilated = args.dilated
-        self.num_filters = [self.num_protos // len(self.dilated)] * len(self.dilated)
-        self.num_filters[0] += self.num_protos % len(self.dilated)
+        self.num_filters = [self.num_prototypes // len(self.dilated)] * len(self.dilated)
+        self.num_filters[0] += self.num_prototypes % len(self.dilated)
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
 
@@ -139,6 +127,8 @@ class ProtoPNetConv(ProtoPNet):
         # embedding = self.emb_trafo(embedding)
         distances = self.l2_convolution(embedding)
         prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
+        # similarity = dist2similarity(prototype_distances)
+        # class_out = self.fc(similarity)
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
 
@@ -187,8 +177,8 @@ class ProtoPNetConv(ProtoPNet):
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
             token2text = self.tokenizer.decode(text_nearest[i][w_indices].tolist())
-            proto_ids.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | proto: {token2text} | text: ")
-            proto_texts.append(f"{text_train[s_index]}")
+            proto_ids.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | text: {text_train[s_index]}| proto: ")
+            proto_texts.append(f"{token2text}")
 
         return proto_ids, proto_texts
 
