@@ -6,7 +6,7 @@ from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model
 import transformers
 import logging
 from transformers import BertForSequenceClassification
-# from utils import dist2similarity
+from utils import dist2similarity
 
 
 class ProtoNet(nn.Module):
@@ -16,6 +16,7 @@ class ProtoNet(nn.Module):
         self.num_prototypes = args.num_prototypes
         self.LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
         self.enc_size = self.LM.get_sentence_embedding_dimension()
+        self.metric = args.metric
         for param in self.LM.parameters():
             param.requires_grad = False
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, 1))),
@@ -23,9 +24,16 @@ class ProtoNet(nn.Module):
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
     def forward(self, embedding):
-        prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
-        # similarity = dist2similarity(prototype_distances)
-        # class_out = self.fc(similarity)
+        if self.metric == 'L2':
+            prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
+            prototype_distances = - dist2similarity(prototype_distances)
+        elif self.metric == 'cosine':
+            N = embedding.size(0)  # Batch size
+            embedding = embedding.view(N, 1, self.enc_size)
+            p = self.protolayer.view(1, self.num_prototypes, self.enc_size)
+            # negative since loss minimizes and we want to maximize the similarity
+            prototype_distances = - F.cosine_similarity(embedding, p, dim=-1)
+
         class_out = self.fc(prototype_distances)
         return prototype_distances, prototype_distances, class_out
 
@@ -69,8 +77,8 @@ class ProtoPNet(nn.Module):
     def __init__(self, args):
         super(ProtoPNet, self).__init__()
         if args.language_model == 'Bert':
-            self.tokenizer = BertTokenizer.from_pretrained('bert-large-cased')
-            self.LM = BertModel.from_pretrained('bert-large-cased')
+            self.tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
+            self.LM = BertModel.from_pretrained('bert-large-uncased')
         elif 'GPT2':
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2-xl')
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -80,6 +88,7 @@ class ProtoPNet(nn.Module):
             param.requires_grad = False
         self.proto_size = args.proto_size
         self.num_prototypes = args.num_prototypes
+        self.metric = args.metric
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
         self.emb_trafo = nn.Sequential(
                 nn.Linear(in_features=self.enc_size, out_features=self.enc_size),
@@ -116,36 +125,43 @@ class ProtoPNet(nn.Module):
 class ProtoPNetConv(ProtoPNet):
     def __init__(self, args):
         super(ProtoPNetConv, self).__init__(args)
-        self.ones = nn.Parameter(torch.ones(args.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
+        self.ones = nn.Parameter(torch.ones(self.num_prototypes, self.enc_size, args.proto_size), requires_grad=False)
         self.dilated = args.dilated
         self.num_filters = [self.num_prototypes // len(self.dilated)] * len(self.dilated)
         self.num_filters[0] += self.num_prototypes % len(self.dilated)
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((self.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
 
     def forward(self, embedding):
         # embedding = self.emb_trafo(embedding)
-        distances = self.l2_convolution(embedding)
+        distances = self.compute_distance(embedding)
         prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
         # similarity = dist2similarity(prototype_distances)
         # class_out = self.fc(similarity)
         class_out = self.fc(prototype_distances)
         return prototype_distances, distances, class_out
 
-    def l2_convolution(self, x):
-        # l2-convolution filters on input x
-        x = x.permute(0,2,1)
-        x2 = x ** 2
-
-        p2 = self.protolayer ** 2
-        p2_sum = torch.sum(p2, dim=(1, 2)).view(-1,1)
+    def compute_distance(self, batch):
+        N, S = batch.shape[0:2]  # Batch size, Sequence length
+        E = self.enc_size  # Encoding size
+        K = self.proto_size  # Patch length
 
         distances, j = [], 0
         for d, n in zip(self.dilated, self.num_filters):
-            x2_patch_sum = F.conv1d(input=x2, weight=self.ones[:n], dilation=d)
-            xp = F.conv1d(input=x, weight=self.protolayer[j:j+n], dilation=d)
-            # L2-distance aka sqrt(x² - 2xp + p²)
-            dist = torch.sqrt(F.relu(x2_patch_sum - 2 * xp + p2_sum[j:j+n]))
+            H = S - d * (K - 1)  # Number of patches
+            x = batch.unsqueeze(1)
+            # use sliding window to get patches
+            x = F.unfold(x, kernel_size=(K, 1), dilation=d)
+            x = x.view(N, 1, H, K * E)
+            p = self.protolayer[j:j+n]
+            p = p.view(1, n, 1, K * E)
+            if self.metric == 'L2':
+                dist = torch.norm(x - p, dim=-1)
+                dist = - dist2similarity(dist)
+            elif self.metric == 'cosine':
+                # negative since loss minimizes and we want to maximize the similarity
+                dist = - F.cosine_similarity(x, p, dim=-1)
+
             distances.append(dist)
             j += n
 

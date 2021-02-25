@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.decomposition import PCA
 from MulticoreTSNE import MulticoreTSNE as TSNE
 import matplotlib.pyplot as plt
@@ -10,15 +11,17 @@ import pickle
 import nltk
 from nltk.corpus import stopwords
 import string
+import gpumap
+
 words = set(nltk.corpus.words.words())
-cos = nn.CosineSimilarity()
 
 
 # __import__("pdb").set_trace()
 
 def dist2similarity(distance):
-    # turn distance to similarity. if distance is small we have value 1, if distance is infinity we have 0
-    return torch.exp(-distance)
+    # turn distance into similarity. if distance is very small we have value ~1, if distance is infinite we have 0.
+    # something like cosine. Also scale distance by 0.01 to not get too small values.
+    return torch.exp(-distance * 0.05)
 
 def finetune_prototypes(args, protos2finetune, model):
     # # if mode == 'weights':
@@ -61,7 +64,7 @@ def remove_prototypes(args, protos2remove, model, use_cos=False):
         for k, l in comb:
             # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
             # too far spread
-            similarity = cos(model.protolayer[k, :, :], model.protolayer[l, :, :])
+            similarity = F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :], dim=0)
             similarity = torch.sum(similarity) / args.proto_size
             if similarity>0.9:
                 protos2remove.append(int(k))
@@ -106,9 +109,9 @@ def prune_prototypes(args, proto_texts, model):
         p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
         pruned_protos.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words and len(w)>1]))
     new_prototypes = model.compute_embedding(pruned_protos, args).to(f'cuda:{args.gpu[0]}')
-    if len(new_prototypes.size())<3: new_prototypes.unsqueeze_(-1)
+    if len(new_prototypes.size()) < 3: new_prototypes.unsqueeze_(-1)
     # only assign new prototypes if cosine similarity to old one is close
-    angle = cos(model.protolayer, new_prototypes)
+    angle =  F.cosine_similarity(model.protolayer, new_prototypes)
     mask = (angle>0.85).squeeze()
 
     # further reduce length if possible
@@ -118,7 +121,7 @@ def prune_prototypes(args, proto_texts, model):
         else:
             new_prototxts_ = pruned_protos[i]
         new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
-        angle_ = cos(model.protolayer[i].T, new_prototypes_)
+        angle_ = F.cosine_similarity(model.protolayer[i].T, new_prototypes_)
         if angle_>0.85:
             pruned_protos[i] = new_prototxts_
             new_prototypes[i] = new_prototypes_.T
@@ -131,46 +134,65 @@ def prune_prototypes(args, proto_texts, model):
     model.protolayer.requires_grad = False
     return model, proto_texts
 
-def visualize_protos(args, embedding, labels, prototypes, n_components=2):
-        # visualize prototypes
-        if args.trans_type == 'PCA':
-            pca = PCA(n_components=n_components)
-            pca.fit(embedding)
-            print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
-            embed_trans = pca.transform(embedding)
-            proto_trans = pca.transform(prototypes)
-        elif args.trans_type == 'TSNE':
-            tsne = TSNE(n_jobs=8,n_components=n_components).fit_transform(np.vstack((embedding,prototypes)))
-            [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
-        rnd_samples = np.random.randint(embed_trans.shape[0], size=1000)
-        rnd_labels = [labels[i] for i in rnd_samples]
-        cdict_d = {0:'red', 1:'green'}
-        ldict_d = {0:'data_neg', 1:'data_pos'}
-        cdict_p = {0:'blue', 1:'orange'}
-        ldict_p = {0:'proto_neg', 1:'proto_pos'}
-        fig = plt.figure()
-        if n_components==2:
-            ax = fig.add_subplot(111)
-            for cl in range(args.num_classes):
-                ix = np.where(np.array(rnd_labels) == cl)
-                ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
-                ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
-                ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
-            for i in range(args.num_prototypes):
-                txt = "P" + str(i + 1)
-                ax.annotate(txt, (proto_trans[i, 0], proto_trans[i, 1]), color='black')
-        elif n_components==3:
-            ax = fig.add_subplot(111, projection='3d')
-            for cl in range(args.num_classes):
-                ix = np.where(np.array(rnd_labels) == cl)
-                ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],embed_trans[rnd_samples[ix],2],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
-                ix = np.where(args.prototype_class_identity[:,cl].cpu().numpy() == 1)
-                ax.scatter(proto_trans[ix,0],proto_trans[ix,1],proto_trans[ix,2],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
-            for i in range(args.num_prototypes):
-                txt = "P" + str(i+1)
-                ax.annotate(txt, (proto_trans[i,0],proto_trans[i,1],proto_trans[i,2]), color='black')
-        ax.legend()
-        fig.savefig(os.path.join(os.path.dirname(args.model_path), args.trans_type+'proto_vis'+str(n_components)+'d.png'))
+def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
+    # visualize prototypes and data set
+    sample_size = 1000
+    rnd_samples = np.random.randint(embedding.shape[0], size=sample_size)
+    rnd_labels = [labels[i] for i in rnd_samples]
+    cdict_d = {0: 'red', 1: 'green'}
+    ldict_d = {0: 'data_neg', 1: 'data_pos'}
+    cdict_p = {0: 'blue', 1: 'orange'}
+    ldict_p = {0: 'proto_neg', 1: 'proto_pos'}
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+
+    # adjust data to be able to visualize word embedding data
+    if len(embedding.shape) == 3:
+        seq_length = embedding.shape[1]
+        rnd_labels = [[i]*embedding.shape[1] for i in rnd_labels]
+        rnd_labels = [label for sent in rnd_labels for label in sent]
+        # flatten tensors and reduce size since otherwise not feasible for PCA
+        embedding = embedding[rnd_samples]
+        embedding = embedding.reshape(-1,model.enc_size)
+        prototypes = prototypes.reshape(-1,model.enc_size)
+        # subsample again for plot
+        rnd_samples = ((np.random.randint(sample_size, size=25) * seq_length).reshape(-1,1) + np.arange(seq_length)).reshape(-1)
+        rnd_labels = np.array(rnd_labels)[rnd_samples].tolist()
+
+    if args.trans_type == 'PCA':
+        pca = PCA(n_components=2)
+        pca.fit(embedding)
+        print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
+        embed_trans = pca.transform(embedding)
+        proto_trans = pca.transform(prototypes)
+    elif args.trans_type == 'TSNE':
+        tsne = TSNE(n_jobs=8,n_components=2).fit_transform(np.vstack((embedding,prototypes)))
+        [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
+    elif args.trans_type == 'UMAP':
+        umap = gpumap.GPUMAP().fit_transform(np.vstack((embedding,prototypes)))
+        [embed_trans, proto_trans] = [umap[:len(embedding)], umap[len(embedding):]]
+
+    for cl in range(args.num_classes):
+        ix = np.where(np.array(rnd_labels) == cl)[0]
+        ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+        ix = np.where(proto_labels[:,cl].cpu().numpy() == 1)[0]
+        if args.proto_size > 1:
+            ix = [args.proto_size * i + x for i in ix.tolist() for x in range(args.proto_size)]
+        ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
+
+    n = 0
+    for i in range(args.num_prototypes):
+        txt = "P" + str(i + 1)
+        if args.proto_size == 1:
+            ax.annotate(txt, (proto_trans[i, 0], proto_trans[i, 1]), color='black')
+        elif args.proto_size > 1:
+            for j in range(args.proto_size):
+                ax.annotate(txt, (proto_trans[n, 0], proto_trans[n, 1]), color='black')
+                n += 1
+
+    ax.legend()
+    fig.savefig(os.path.join(os.path.dirname(args.model_path), args.trans_type+'proto_vis2D.png'))
+
 
 def proto_loss(prototype_distances, label, model, args):
     if args.class_specific:
@@ -207,10 +229,10 @@ def proto_loss(prototype_distances, label, model, args):
     for k, l in comb:
         # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
         # too far spread
-        dist = torch.dist(model.protolayer[k, :, :], model.protolayer[l, :, :], p=2)
-        limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
-        dist_sum += torch.maximum(limit, dist)
-        # dist_sum += cos(model.protolayer[k, :, :], model.protolayer[l, :, :])
+        # dist = torch.dist(model.protolayer[k, :, :], model.protolayer[l, :, :], p=2)
+        # limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
+        # dist_sum += torch.maximum(limit, dist)
+        dist_sum -= torch.mean(F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :],dim=0))
     # if distance small -> higher penalty
     divers_loss = - dist_sum / comb.size(0)
 

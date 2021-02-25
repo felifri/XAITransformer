@@ -33,15 +33,15 @@ parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
-parser.add_argument('-l1','--lambda1', default=0.02, type=float,
+parser.add_argument('-l1','--lambda1', default=0.2, type=float,
                     help='Weight for prototype distribution loss')
 parser.add_argument('-l2','--lambda2', default=0.1, type=float,
                     help='Weight for prototype cluster loss')
 parser.add_argument('-l3','--lambda3', default=0.01, type=float,
                     help='Weight for prototype separation loss')
-parser.add_argument('-l4','--lambda4', default=0.01, type=float,
-                    help='Weight for wihtin prototype diversity loss')
-parser.add_argument('-l5','--lambda5', default=1e-4, type=float,
+parser.add_argument('-l4','--lambda4', default=0.1, type=float,
+                    help='Weight for prototype diversity loss')
+parser.add_argument('-l5','--lambda5', default=1e-2, type=float,
                     help='Weight for l1 weight regularization loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -49,7 +49,7 @@ parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
-parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE'],
+parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE', 'UMAP'],
                     help='Select transformation to visualize the prototypes')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
@@ -59,7 +59,7 @@ parser.add_argument('--level', type=str, default='word', choices=['word','senten
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
                     help='Define which language model to use')
-parser.add_argument('--dilated', type=int, default=[1], nargs='+',
+parser.add_argument('-d','--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
 parser.add_argument('--avoid_spec_token', type=bool, default=False,
                     help='Whether to manually set PAD, SEP and CLS token to high value after Bert embedding computation')
@@ -67,6 +67,8 @@ parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
 parser.add_argument('--query', type=str, default='I do not like the food here', nargs='+',
                     help='Type your query to test the model and get classification explanation')
+parser.add_argument('--metric', type=str, default='cosine', choices=['cosine','L2'],
+                    help='What metric should be used to compute the distance/ similarity?')
 
 def train(args, train_batches, val_batches, model):
     num_epochs = args.num_epochs
@@ -114,8 +116,8 @@ def train(args, train_batches, val_batches, model):
 
             loss.backward()
             optimizer.step()
-            # with torch.no_grad():
-            #     model.fc.weight.copy_(model.fc.weight.data.clamp(max=0.5))
+            with torch.no_grad():
+                model.fc.weight.copy_(model.fc.weight.data.clamp(max=0.0))
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -214,7 +216,7 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_ids, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+        proto_info, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
         weights = model.get_proto_weights()
 
         if os.path.basename(args.model_path).startswith('interacted'):
@@ -223,7 +225,7 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
                 proto_texts = pruned_text
         else:
             fname = "prototypes.txt"
-        proto_texts = [id_ + txt for id_, txt in zip(proto_ids, proto_texts)]
+        proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
         txt_file = open(save_path, "w+")
         for arg in vars(args):
@@ -236,15 +238,14 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
             txt_file.write(str(line) + "\n")
         txt_file.close()
 
+        # give prototpyes its "true" label after training
+        s = 'label'
+        proto_labels = torch.tensor([int(p[p.index(s) + len(s)+1]) for p in proto_info])
+        proto_labels = torch.stack((proto_labels, 1-proto_labels))
+
         # plot prototypes
         prototypes = model.get_protos().cpu().numpy()
-        if len(embedding_train.shape) == 2:
-            visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, n_components=2)
-        # elif len(embedding_train.shape) == 3:
-            # embedding_train = embedding_train.view(-1,model.enc_size)
-            # prototypes = prototypes.view(-1,model.enc_size)
-            # prototypes = prototypes[:,0,:] #TODO: not yet correct, only takes the first word instead of all words
-        # visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, n_components=3)
+        visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, model, proto_labels)
 
 
 def query(args, train_batches, labels_train, text_train, model):
@@ -255,8 +256,8 @@ def query(args, train_batches, labels_train, text_train, model):
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_ids, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
-    proto_texts = [id_+txt for id_, txt in zip(proto_ids,proto_texts)]
+    proto_info, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+    proto_texts = [id_+txt for id_, txt in zip(proto_info,proto_texts)]
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
     predicted = torch.argmax(predicted_label).cpu()
 
@@ -316,7 +317,6 @@ def interact(args, train_batches, val_batches, embedding_train, test_batches, la
 if __name__ == '__main__':
     torch.manual_seed(0)
     np.random.seed(0)
-    random.seed(0)
     torch.set_num_threads(6)
     args = parser.parse_args()
 
