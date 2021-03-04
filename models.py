@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
-from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model
+from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model, DistilBertTokenizer, DistilBertModel
+from transformers import TransfoXLTokenizer, TransfoXLModel, RobertaTokenizer, RobertaModel
 import transformers
 import logging
 from transformers import BertForSequenceClassification
@@ -28,8 +29,8 @@ class ProtoNet(nn.Module):
             prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
             prototype_distances = - dist2similarity(prototype_distances)
         elif self.metric == 'cosine':
-            N = embedding.size(0)  # Batch size
-            embedding = embedding.view(N, 1, self.enc_size)
+            bs = embedding.size(0)  # Batch size
+            embedding = embedding.view(bs, 1, self.enc_size)
             p = self.protolayer.view(1, self.num_prototypes, self.enc_size)
             # negative since loss minimizes and we want to maximize the similarity
             prototype_distances = - F.cosine_similarity(embedding, p, dim=-1)
@@ -79,10 +80,20 @@ class ProtoPNet(nn.Module):
         if args.language_model == 'Bert':
             self.tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
             self.LM = BertModel.from_pretrained('bert-large-uncased')
-        elif 'GPT2':
+        elif args.language_model == 'GPT2':
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2-xl')
-            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            self.tokenizer.pad_token = '[PAD]'
             self.LM = GPT2Model.from_pretrained('gpt2-xl')
+        elif args.language_model == 'TXL':
+            self.tokenizer = TransfoXLTokenizer.from_pretrained('transfo-xl-wt103')
+            self.tokenizer.pad_token = '[PAD]'
+            self.LM = TransfoXLModel.from_pretrained('transfo-xl-wt103')
+        elif args.language_model == 'Roberta':
+            self.tokenizer = RobertaTokenizer.from_pretrained('roberta-large-mnli')
+            self.LM = RobertaModel.from_pretrained('roberta-large-mnli')
+        elif args.language_model == 'DistilBert':
+            self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+            self.LM = DistilBertModel.from_pretrained('distilbert-base-uncased')
         self.enc_size = self.LM.config.hidden_size
         for param in self.LM.parameters():
             param.requires_grad = False
@@ -107,17 +118,15 @@ class ProtoPNet(nn.Module):
         bs = 10 # divide data by a batch size if too big for memory to process embedding at once
         word_embedding = []
         inputs = self.tokenizer(x, return_tensors="pt", padding=True, add_special_tokens=False)
+        inputs_ = {'input_ids': [], 'attention_mask': []}
         for i in range(0,len(x),bs):
-            inputs_ = inputs.copy()
-            inputs_['input_ids'] = inputs_['input_ids'][i:i+bs].to(f'cuda:{args.gpu[0]}')
-            inputs_['attention_mask'] = inputs_['attention_mask'][i:i+bs].to(f'cuda:{args.gpu[0]}')
+            inputs_['input_ids'] = inputs['input_ids'][i:i+bs].to(f'cuda:{args.gpu[0]}')
+            inputs_['attention_mask'] = inputs['attention_mask'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             outputs = self.LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
             if args.avoid_spec_token:
-                # set embedding values of PAD token to a high number to make it "unlikely regarded" in distance computation
-                inputs_['attention_mask'][inputs_['attention_mask']==0] = 1e3
-                word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
-            else:
-                word_embedding.extend(outputs[0].cpu())
+                # set embedding values of PAD token to 0 or a high number to make it "unlikely regarded" in distance computation
+                outputs[0][inputs_['attention_mask'] == 0] = 0
+            word_embedding.extend(outputs[0].cpu())
         embedding = torch.stack(word_embedding, dim=0)
         return embedding
 
