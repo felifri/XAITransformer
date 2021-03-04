@@ -11,6 +11,7 @@ import pickle
 import nltk
 from nltk.corpus import stopwords
 import string
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 import gpumap
 
 words = set(nltk.corpus.words.words())
@@ -22,6 +23,15 @@ def dist2similarity(distance):
     # turn distance into similarity. if distance is very small we have value ~1, if distance is infinite we have 0.
     # something like cosine. Also scale distance by 0.01 to not get too small values.
     return torch.exp(-distance * 0.05)
+
+def adjust_cl_ids(args, ids):
+    for i in ids:
+        if i == 0:
+            cl = torch.Tensor([1, 0]).view(1,2).to(f'cuda:{args.gpu[0]}')
+        elif i == 1:
+            cl = torch.Tensor([0, 1]).view(1, 2).to(f'cuda:{args.gpu[0]}')
+        args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
+    return args
 
 def finetune_prototypes(args, protos2finetune, model):
     # # if mode == 'weights':
@@ -45,25 +55,26 @@ def reinit_prototypes(args, protos2reinit, model):
 
 def add_prototypes(args, protos2add, model):
     # reassign protolayer, add new ones
-    protos2add = model.compute_emb(protos2add, args)
-    protos2add = protos2add.view(-1, model.enc_size, 1)
+    args = adjust_cl_ids(args, protos2add[1])
+    protos2add = model.compute_embedding(protos2add[0], args)
+    protos2add = protos2add.view(-1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
     new_protos = torch.cat((model.protolayer.data,protos2add))
-    model.protolayer = nn.Parameter(new_protos,requires_grad=False)
+    model.protolayer = nn.Parameter(new_protos,requires_grad=True)
     # reassign last layer, add new ones
-    weights2keep = model.fc.data.detach().clone()
-    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False)
-    new_weights = nn.init.uniform_(torch.empty((len(protos2add), args.num_classes)))
-    model.fc.data = torch.cat((weights2keep, new_weights))
+    weights2keep = model.fc.weight.data.detach().clone()
+    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
+    new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
+    model.fc.data = torch.cat((weights2keep, new_weights), dim=1)
     args.num_prototypes = args.num_prototypes + len(protos2add)
     args, model = update_params(args, model)
     return args, model
 
 def remove_prototypes(args, protos2remove, model, use_cos=False):
+    mask = [True if p not in protos2remove else False for p in range(args.num_prototypes)]
+    args.prototype_class_identity =  args.prototype_class_identity[mask,:]
     if use_cos:
         comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
         for k, l in comb:
-            # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
-            # too far spread
             similarity = F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :], dim=0)
             similarity = torch.sum(similarity) / args.proto_size
             if similarity>0.9:
@@ -73,7 +84,7 @@ def remove_prototypes(args, protos2remove, model, use_cos=False):
     protos2remove = list(set(protos2remove))
     protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
     # reassign protolayer, remove unneeded ones and only keep useful ones
-    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=False)
+    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=True)
     weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
     model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
     model.fc.weight.data = weights2keep
@@ -86,13 +97,12 @@ def update_params(args, model):
     if args.dilated:
         model.num_filters = [model.num_prototypes // len(args.dilated)] * len(args.dilated)
         model.num_filters[0] += model.num_prototypes % len(args.dilated)
-    args.prototype_class_identity =  args.prototype_class_identity[:args.num_prototypes,:]
     return args, model
 
-def get_nearest(args, model, train_batches, text_train, labels_train):
+def get_nearest(args, model, train_batches_unshuffled, text_train, labels_train):
     model.eval()
     dist = []
-    for batch, _ in train_batches:
+    for batch, _ in train_batches_unshuffled:
         batch = batch.to(f'cuda:{args.gpu[0]}')
         _, distances, _ = model.forward(batch)
         dist.append(distances)
@@ -135,7 +145,7 @@ def prune_prototypes(args, proto_texts, model):
     return model, proto_texts
 
 def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
-    # visualize prototypes and data set
+    # sample from data set for plot
     sample_size = 1000
     rnd_samples = np.random.randint(embedding.shape[0], size=sample_size)
     rnd_labels = [labels[i] for i in rnd_samples]
@@ -146,17 +156,19 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
     fig = plt.figure()
     ax = fig.add_subplot(111)
 
-    # adjust data to be able to visualize word embedding data
+    # sample data again to be able to visualize word embedding data, otherwise transformation too hard to compute
     if len(embedding.shape) == 3:
+        sample_size = 10000
         seq_length = embedding.shape[1]
-        rnd_labels = [[i]*embedding.shape[1] for i in rnd_labels]
+        rnd_samples = np.random.randint(embedding.shape[0], size=sample_size)
+        rnd_labels = [[labels[i]]*embedding.shape[1] for i in rnd_samples]
         rnd_labels = [label for sent in rnd_labels for label in sent]
         # flatten tensors and reduce size since otherwise not feasible for PCA
         embedding = embedding[rnd_samples]
         embedding = embedding.reshape(-1,model.enc_size)
         prototypes = prototypes.reshape(-1,model.enc_size)
         # subsample again for plot
-        rnd_samples = ((np.random.randint(sample_size, size=25) * seq_length).reshape(-1,1) + np.arange(seq_length)).reshape(-1)
+        rnd_samples = ((np.random.randint(sample_size, size=35) * seq_length).reshape(-1,1) + np.arange(seq_length)).reshape(-1)
         rnd_labels = np.array(rnd_labels)[rnd_samples].tolist()
 
     if args.trans_type == 'PCA':
@@ -169,16 +181,16 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
         tsne = TSNE(n_jobs=8,n_components=2).fit_transform(np.vstack((embedding,prototypes)))
         [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
     elif args.trans_type == 'UMAP':
-        umap = gpumap.GPUMAP().fit_transform(np.vstack((embedding,prototypes)))
-        [embed_trans, proto_trans] = [umap[:len(embedding)], umap[len(embedding):]]
+        umapped = gpumap.GPUMAP().fit_transform(np.vstack((embedding,prototypes)))
+        [embed_trans, proto_trans] = [umapped[:len(embedding)], umapped[len(embedding):]]
 
     for cl in range(args.num_classes):
         ix = np.where(np.array(rnd_labels) == cl)[0]
-        ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.6)
+        ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.3)
         ix = np.where(proto_labels[:,cl].cpu().numpy() == 1)[0]
         if args.proto_size > 1:
             ix = [args.proto_size * i + x for i in ix.tolist() for x in range(args.proto_size)]
-        ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=70)
+        ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=80)
 
     n = 0
     for i in range(args.num_prototypes):
@@ -191,7 +203,8 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
                 n += 1
 
     ax.legend()
-    fig.savefig(os.path.join(os.path.dirname(args.model_path), args.trans_type+'proto_vis2D.png'))
+    prefix = 'interacted_' if 'interacted' in args.model_path else ''
+    fig.savefig(os.path.join(os.path.dirname(args.model_path), prefix+args.trans_type+'proto_vis2D.png'))
 
 
 def proto_loss(prototype_distances, label, model, args):
@@ -236,11 +249,7 @@ def proto_loss(prototype_distances, label, model, args):
     # if distance small -> higher penalty
     divers_loss = - dist_sum / comb.size(0)
 
-    if args.use_l1_mask:
-        l1_mask = 1 - torch.t(args.prototype_class_identity).to(f'cuda:{args.gpu[0]}')
-        l1_loss = (model.fc.weight.data * l1_mask).norm(p=1)
-    else:
-        l1_loss = model.fc.weight.data.norm(p=1)
+    l1_loss = model.fc.weight.data.norm(p=1)
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
@@ -248,7 +257,7 @@ def proto_loss(prototype_distances, label, model, args):
 ###### load toxicity data ##########################
 ####################################################
 
-def parse_prompts_and_continuation(tag, discrete=True, discard=False, file_dir=None):
+def parse_prompts_and_continuation(tag, discrete=True, discard=False, remove_long=True, file_dir=None):
     if file_dir is None:
         dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
     else:
@@ -258,29 +267,23 @@ def parse_prompts_and_continuation(tag, discrete=True, discard=False, file_dir=N
     dataset = pd.read_json(dataset_file, lines=True)
     prompts = pd.json_normalize(dataset['prompt'])
     assert tag in list(prompts.keys())
-    x_prompts = prompts['text'].tolist()
-    y_prompts = prompts[tag].tolist()
+    text_prompts = prompts['text'].tolist()
+    labels_prompts = prompts[tag].tolist()
 
     continuation = pd.json_normalize(dataset['continuation'])
-    x_continuation = continuation['text'].tolist()
-    y_continuation = continuation[tag].tolist()
+    text_continuation = continuation['text'].tolist()
+    labels_continuation = continuation[tag].tolist()
 
-    x = x_continuation + x_prompts
-    y = y_continuation + y_prompts
+    text = text_continuation + text_prompts
+    labels = labels_continuation + labels_prompts
 
-    if discard:
-        x = list([a for a, e in zip(x, y) if (e < 0.3 or e > 0.7)])
-        y = list([e for e in y if (e < 0.3 or e > 0.7)])
+    text, labels = preprocessor_toxic(text, labels, discrete, discard, remove_long)
+    return text, labels
 
-    if discrete:
-        y = list([0 if e < 0.5 else 1 for e in y])
-
-    return x, y
-
-
-def parse_full(tag, discrete=True, discard=False, file_dir=None):
+def parse_full(tag, args, discrete=True, discard=False, remove_long=True, file_dir=None):
     if file_dir is None:
         dataset_file = "./data/realtoxicityprompts/full data.jsonl"
+        file_dir = "./data/realtoxicityprompts"
     else:
         dataset_file = file_dir + "/full data.jsonl"
 
@@ -289,41 +292,71 @@ def parse_full(tag, discrete=True, discard=False, file_dir=None):
     data = [x[0] for x in dataset['generations'].tolist()]
     assert tag in list(data[0].keys())
 
-    x = list([e['text'] for e in data])
-    y = list([e[tag] for e in data])
-    assert len(x) == len(y)
+    text = list([e['text'] for e in data])
+    labels = list([e[tag] for e in data])
+    assert len(text) == len(labels)
 
     idx = []
-    for i in range(len(x)):
-        if y[i] is None:
+    for i in range(len(text)):
+        if labels[i] is None:
             idx.append(i)
 
-    x = [e for i, e in enumerate(x) if i not in idx]
-    y = [e for i, e in enumerate(y) if i not in idx]
+    text = [t for i, t in enumerate(text) if i not in idx]
+    labels = [l for i, l in enumerate(labels) if i not in idx]
 
-    assert len(x) == len(y)
+    assert len(text) == len(labels)
+    text, labels = preprocessor_toxic(text, labels, discrete, discard, remove_long)
+
+    if args.data_name == 'toxicity_full':
+        pickle.dump(text, open(file_dir + '/text_full.pkl', 'wb'))
+        pickle.dump(labels, open(file_dir + '/labels_full.pkl', 'wb'))
+    return text, labels
+
+def parse_all(tag, args, file_dir=None):
+    text, labels = [], []
+    text_, labels_ = parse_prompts_and_continuation(tag, discard=args.discard, file_dir=file_dir)
+    text += text_
+    labels += labels_
+    text_, labels_ = parse_full(tag, args, discard=args.discard, file_dir=file_dir)
+    text += text_
+    labels += labels_
+    file_dir = os.path.join(args.data_dir, "realtoxicityprompts")
+    pickle.dump(text, open(file_dir + '/text.pkl', 'wb'))
+    pickle.dump(labels, open(file_dir + '/labels.pkl', 'wb'))
+    return text, labels
+
+def preprocessor_toxic(text, labels, discrete, discard, remove_long):
+    if remove_long:
+        labels = list([l for t, l in zip(text, labels) if len(t.split())<=25])
+        text = list([t for t in text if len(t.split())<=25])
 
     if discard:
-        x = list([a for a, e in zip(x, y) if (e < 0.3 or e > 0.7)])
-        y = list([e for e in y if (e < 0.3 or e > 0.7)])
+        text = list([t for t, l in zip(text, labels) if (l < 0.3 or l > 0.7)])
+        labels = list([l for l in labels if (l < 0.3 or l > 0.7)])
 
     if discrete:
-        y = [0 if e < 0.5 else 1 for e in y]
+        labels = [0 if l < 0.5 else 1 for l in labels]
 
-    return x, y
+    # remove non english words (some reviews in Chinese, etc.), but keep digits and punctuation
+    for i,t in enumerate(text):
+        text[i] = convert_language(t)
+        if not text[i]:
+            del text[i], labels[i]
 
-# get toxicity data, x is text as list of strings, y is list of ints (0,1)
-def parse_all(tag, args, file_dir=None):
-    x, y = [], []
-    x_, y_ = parse_prompts_and_continuation(tag, discard=args.discard, file_dir=file_dir)
-    x += x_
-    y += y_
-    x_, y_ = parse_full(tag, discard=args.discard, file_dir=file_dir)
-    x += x_
-    y += y_
-    return x, y
+    assert len(text) == len(labels)
+    max_len = 200_000
+    if len(text)> max_len:
+        text = [text[i] for i in range(max_len)]
+        labels = [labels[i] for i in range(max_len)]
+    return text, labels
 
-
+def get_toxicity(args):
+    f = '_full' if args.data_name == 'toxicity_full' else ''
+    data_name = "realtoxicityprompts"
+    set_dir = os.path.join(args.data_dir, data_name)
+    text = pickle.load(open(set_dir + '/text' + f + '.pkl', 'rb'))
+    labels = pickle.load(open(set_dir + '/labels' + f + '.pkl', 'rb'))
+    return text, labels
 ####################################################
 ###### load movie review data ######################
 ####################################################
@@ -336,7 +369,7 @@ def get_reviews(args):
         set_dir = os.path.join(args.data_dir, args.data_name, set_name)
         text_tmp = pickle.load(open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
         # join tokenized sentences back to full sentences for sentenceBert
-        text_tmp = [' '.join(sub_list) for sub_list in text_tmp]
+        text_tmp = [TreebankWordDetokenizer().detokenize(sub_list) for sub_list in text_tmp]
         text.extend(text_tmp)
         label_tmp = pickle.load(open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
         # convert 'pos' & 'neg' to 1 & 0
@@ -380,14 +413,14 @@ def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
     if binary:
         labels = list([0 if l < 2.5 else 1 for l in labels])
 
-    # remove non english words (some reviews in Chinese, etc.)
+    # remove non english words (some reviews in Chinese, etc.), but keep digits and punctuation
     for i,t in enumerate(text):
         text[i] = convert_language(t)
         if not text[i]:
             del text[i], labels[i]
 
     assert len(text) == len(labels)
-    max_len = 250_000
+    max_len = 200_000
     if len(text)> max_len:
         text = [text[i] for i in range(max_len)]
         labels = [labels[i] for i in range(max_len)]
@@ -396,7 +429,8 @@ def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
     return text, labels
 
 def convert_language(seq):
-    return " ".join(w for w in nltk.wordpunct_tokenize(seq) if w.lower() in words and w.isalpha())
+    return TreebankWordDetokenizer().detokenize(w for w in nltk.wordpunct_tokenize(seq) if (w.lower() in words) or
+                                                (w.lower() in string.punctuation) or (w.lower().isdigit()))
 
 def get_restaurant(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
@@ -408,16 +442,13 @@ def get_restaurant(args):
 ###### main loading function #######################
 ####################################################
 
-def load_data(args, file_dir=None):
-    tag = args.data_name
+def load_data(args):
     texts, labels = [], []
-    if tag == 'toxicity':
-        texts, labels = parse_all(tag, args, file_dir)
-    elif tag == 'toxicity_full':
-        texts, labels = parse_full('toxicity', discard=args.discard, file_dir=file_dir)
-    elif tag == 'rt-polarity':
+    if args.data_name == 'toxicity' or args.data_name == 'toxicity_full':
+        texts, labels = get_toxicity(args)
+    elif args.data_name == 'rt-polarity':
         texts, labels = get_reviews(args)
-    elif tag == 'restaurant':
+    elif args.data_name == 'restaurant':
         texts, labels = get_restaurant(args)
     return texts, labels
 
