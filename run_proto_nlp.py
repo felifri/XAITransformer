@@ -49,7 +49,7 @@ parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
-parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE', 'UMAP'],
+parser.add_argument('--trans_type', type=str, default='UMAP', choices=['PCA', 'TSNE', 'UMAP'],
                     help='Select transformation to visualize the prototypes')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
@@ -57,8 +57,8 @@ parser.add_argument('--proto_size', type=int, default=1,
                     help='Define how many words should be used to define a prototype')
 parser.add_argument('--level', type=str, default='word', choices=['word','sentence'],
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
-parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2'],
-                    help='Define which language model to use')
+parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2','TXL','Roberta',
+                    'DistilBert'], help='Define which language model to use')
 parser.add_argument('-d','--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
 parser.add_argument('--avoid_spec_token', type=bool, default=False,
@@ -180,7 +180,7 @@ def train(args, train_batches, val_batches, model):
     torch.save(state, args.model_path)
 
 
-def test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model, pruned_text=None):
+def test(args, embedding_train, train_batches_unshuffled, test_batches, labels_train, text_train, model, pruned_text=None):
     print("\nStart evaluation, loading model:", args.model_path)
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
@@ -216,7 +216,7 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
         # "convert" prototype embedding to text (take text of nearest training sample)
-        proto_info, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+        proto_info, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         weights = model.get_proto_weights()
 
         if os.path.basename(args.model_path).startswith('interacted'):
@@ -224,7 +224,7 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
             if 'prune' in args.mode:
                 proto_texts = pruned_text
         else:
-            fname = "prototypes.txt"
+            fname = str(args.num_prototypes) + "prototypes.txt"
         proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
         txt_file = open(save_path, "w+")
@@ -241,14 +241,14 @@ def test(args, embedding_train, train_batches, test_batches, labels_train, text_
         # give prototpyes its "true" label after training
         s = 'label'
         proto_labels = torch.tensor([int(p[p.index(s) + len(s)+1]) for p in proto_info])
-        proto_labels = torch.stack((proto_labels, 1-proto_labels))
+        proto_labels = torch.stack((1-proto_labels, proto_labels), dim=1)
 
         # plot prototypes
         prototypes = model.get_protos().cpu().numpy()
         visualize_protos(args, embedding_train.cpu().numpy(), labels_train, prototypes, model, proto_labels)
 
 
-def query(args, train_batches, labels_train, text_train, model):
+def query(args, train_batches_unshuffled, labels_train, text_train, model):
     print("\nEvaluate query, loading model:", args.model_path)
     model.eval()
 
@@ -256,7 +256,7 @@ def query(args, train_batches, labels_train, text_train, model):
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_info, proto_texts = get_nearest(args, model, train_batches, text_train, labels_train)
+    proto_info, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
     proto_texts = [id_+txt for id_, txt in zip(proto_info,proto_texts)]
     distances, _, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
     predicted = torch.argmax(predicted_label).cpu()
@@ -279,15 +279,15 @@ def query(args, train_batches, labels_train, text_train, model):
     txt_file.close()
 
 
-def interact(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model):
+def interact(args, train_batches, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model):
     print("\nInteract, loading model:", args.model_path)
     if 'remove' in args.mode:
         # protos2remove = list(map(int,input("Select prototypes to remove: ").split()))
-        protos2remove = [0,2]
+        protos2remove = [1]
         args, model = remove_prototypes(args, protos2remove, model, use_cos=False)
 
     if 'add' in args.mode:
-        protos2add = []
+        protos2add = [['bad service', 'good food'],[0,1]]
         # protos2add = list(map(int,input("Select prototypes to add: ").split()))
         args, model = add_prototypes(args, protos2add, model)
 
@@ -303,7 +303,7 @@ def interact(args, train_batches, val_batches, embedding_train, test_batches, la
 
     pruned_protos = []
     if 'prune' in args.mode:
-        _, protos2prune = get_nearest(args, model, train_batches, text_train, labels_train)
+        _, protos2prune = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         # protos2prune = list(map(int,input("Select prototypes to prune: ").split()))
         model, pruned_protos = prune_prototypes(args, protos2prune, model)
 
@@ -311,7 +311,7 @@ def interact(args, train_batches, val_batches, embedding_train, test_batches, la
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain network, only retrain last layer (fc)
     train(args, train_batches, val_batches, model)
-    test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model, pruned_protos)
+    test(args, embedding_train, train_batches_unshuffled, test_batches, labels_train, text_train, model, pruned_protos)
 
 
 if __name__ == '__main__':
@@ -343,7 +343,6 @@ if __name__ == '__main__':
     # args.prototype_class_identity[:protos_per_class, 0] = 1
     # args.prototype_class_identity[protos_per_class:, 1] = 1
     args.class_specific = True
-    args.use_l1_mask = True
 
     if args.one_shot:
         idx = random.sample(range(len(text_train)), 100)
@@ -354,6 +353,7 @@ if __name__ == '__main__':
     if args.level == 'word':
         model = ProtoPNetConv(args)
     elif args.level == 'sentence':
+        args.language_model = 'SentBert'
         model = ProtoNet(args)
 
     print(f"Running on gpu {args.gpu}")
@@ -364,7 +364,7 @@ if __name__ == '__main__':
     if args.avoid_spec_token:
         avoid = '_avoid'
 
-    fname = args.language_model + args.level
+    fname = args.language_model
     if not args.compute_emb:
         embedding_train = load_embedding(args, fname, 'train' + avoid)
         embedding_val = load_embedding(args, fname, 'val' + avoid)
@@ -379,11 +379,13 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
-                                                shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
+                                                shuffle=True, pin_memory=True, num_workers=0)
+    train_batches_unshuffled = torch.utils.data.DataLoader(list(zip(embedding_train, labels_train)), batch_size=args.batch_size,
+                                                shuffle=False, pin_memory=True, num_workers=0)
     val_batches = torch.utils.data.DataLoader(list(zip(embedding_val, labels_val)), batch_size=args.batch_size,
-                                              shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
+                                              shuffle=False, pin_memory=True, num_workers=0)
     test_batches = torch.utils.data.DataLoader(list(zip(embedding_test, labels_test)), batch_size=args.batch_size,
-                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
+                                               shuffle=False, pin_memory=True, num_workers=0)
 
     time_stmp = datetime.datetime.now().strftime(f"%d-%m %H:%M_{args.num_prototypes}{fname}{args.proto_size}")
     args.model_path = os.path.join("./experiments/train_results/", time_stmp, 'best_model.pth.tar')
@@ -399,9 +401,10 @@ if __name__ == '__main__':
     checkpoint = torch.load(args.model_path)
     model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:
-        test(args, embedding_train, train_batches, test_batches, labels_train, text_train, model)
+        test(args, embedding_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
-        query(args, train_batches, labels_train, text_train, model)
+        query(args, train_batches_unshuffled, labels_train, text_train, model)
     if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
             or 'prune' in args.mode:
-        interact(args, train_batches, val_batches, embedding_train, test_batches, labels_train, text_train, model)
+        interact(args, train_batches, train_batches_unshuffled, val_batches, embedding_train, test_batches,
+                 labels_train, text_train, model)

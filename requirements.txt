@@ -9,4 +9,4 @@ multicoretsne == 0.1
 rtpt
 tqdm
 nltk
-gpumap
+lit-nlp
