@@ -19,6 +19,8 @@ words = set(nltk.corpus.words.words())
 
 # __import__("pdb").set_trace()
 
+#### real utils ##############
+
 def dist2similarity(distance):
     # turn distance into similarity. if distance is very small we have value ~1, if distance is infinite we have 0.
     # something like cosine. Also scale distance by 0.01 to not get too small values.
@@ -33,65 +35,6 @@ def adjust_cl_ids(args, ids):
         args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
     return args
 
-def finetune_prototypes(args, protos2finetune, model):
-    # # if mode == 'weights':
-    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
-    # gradient_mask_fc = torch.zeros(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
-    # gradient_mask_fc[:,protos2finetune] = 1
-    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
-    # if mode == 'prototypes':
-    # also, do not update the selected prototypes which should be kept
-    gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
-    gradient_mask_proto[protos2finetune, :, :] = 1
-    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
-    return model
-
-def reinit_prototypes(args, protos2reinit, model):
-    # reinitialize selected prototypes
-    model.protolayer.data[protos2reinit,:] = nn.init.uniform_(torch.empty(model.protolayer.size()))[protos2reinit,:]
-    # onyl retrain reinitialized protos and set gradients of other prototypes to zero
-    model = finetune_prototypes(args, protos2reinit, model)
-    return model
-
-def add_prototypes(args, protos2add, model):
-    # reassign protolayer, add new ones
-    args = adjust_cl_ids(args, protos2add[1])
-    protos2add = model.compute_embedding(protos2add[0], args)
-    protos2add = protos2add.view(-1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
-    new_protos = torch.cat((model.protolayer.data,protos2add))
-    model.protolayer = nn.Parameter(new_protos,requires_grad=True)
-    # reassign last layer, add new ones
-    weights2keep = model.fc.weight.data.detach().clone()
-    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
-    new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
-    model.fc.data = torch.cat((weights2keep, new_weights), dim=1)
-    args.num_prototypes = args.num_prototypes + len(protos2add)
-    args, model = update_params(args, model)
-    return args, model
-
-def remove_prototypes(args, protos2remove, model, use_cos=False):
-    mask = [True if p not in protos2remove else False for p in range(args.num_prototypes)]
-    args.prototype_class_identity =  args.prototype_class_identity[mask,:]
-    if use_cos:
-        comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
-        for k, l in comb:
-            similarity = F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :], dim=0)
-            similarity = torch.sum(similarity) / args.proto_size
-            if similarity>0.9:
-                protos2remove.append(int(k))
-
-    # make list items unique
-    protos2remove = list(set(protos2remove))
-    protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
-    # reassign protolayer, remove unneeded ones and only keep useful ones
-    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=True)
-    weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
-    model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
-    model.fc.weight.data = weights2keep
-    args.num_prototypes = args.num_prototypes - len(protos2remove)
-    args, model = update_params(args, model)
-    return args, model
-
 def update_params(args, model):
     model.num_prototypes = args.num_prototypes
     if args.dilated:
@@ -101,50 +44,17 @@ def update_params(args, model):
 
 def get_nearest(args, model, train_batches_unshuffled, text_train, labels_train):
     model.eval()
-    dist = []
-    for batch, _ in train_batches_unshuffled:
+    dist, w = [], []
+    for batch, mask, _ in train_batches_unshuffled:
         batch = batch.to(f'cuda:{args.gpu[0]}')
-        _, distances, _ = model.forward(batch)
+        mask = mask.to(f'cuda:{args.gpu[0]}')
+        distances, top_w = model.get_dist(batch, mask)
         dist.append(distances)
-    proto_ids, proto_texts = model.nearest_neighbors(dist, text_train, labels_train)
+        w.append(top_w)
+    proto_ids, proto_texts = model.nearest_neighbors(dist, w, text_train, labels_train)
     return proto_ids, proto_texts
 
-def prune_prototypes(args, proto_texts, model):
-    # define stop words, but e.g. 'not' should not be removed
-    stop_words = set(stopwords.words('english')) - {'not', 'no'}
-    pruned_protos = []
-
-    # remove stop words, non alpha words, single character words and punctuation
-    for p in proto_texts:
-        p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
-        pruned_protos.append(" ".join([w for w in p.split() if w.isalpha() and not w in stop_words and len(w)>1]))
-    new_prototypes = model.compute_embedding(pruned_protos, args).to(f'cuda:{args.gpu[0]}')
-    if len(new_prototypes.size()) < 3: new_prototypes.unsqueeze_(-1)
-    # only assign new prototypes if cosine similarity to old one is close
-    angle =  F.cosine_similarity(model.protolayer, new_prototypes)
-    mask = (angle>0.85).squeeze()
-
-    # further reduce length if possible
-    for i in range(args.num_prototypes):
-        if len(pruned_protos[i])>4:
-            new_prototxts_ = " ".join(pruned_protos[i].split()[0:4])
-        else:
-            new_prototxts_ = pruned_protos[i]
-        new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
-        angle_ = F.cosine_similarity(model.protolayer[i].T, new_prototypes_)
-        if angle_>0.85:
-            pruned_protos[i] = new_prototxts_
-            new_prototypes[i] = new_prototypes_.T
-
-    # mask: replace only words with high cos sim
-    for i,m in enumerate(mask):
-        if m: proto_texts[i] = pruned_protos[i]
-    # assign new prototypes and don't update them when retraining
-    model.protolayer.data[mask] = new_prototypes[mask]
-    model.protolayer.requires_grad = False
-    return model, proto_texts
-
-def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
+def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_labels):
     # sample from data set for plot
     sample_size = 1000
     rnd_samples = np.random.randint(embedding.shape[0], size=sample_size)
@@ -158,23 +68,26 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
 
     # sample data again to be able to visualize word embedding data, otherwise transformation too hard to compute
     if len(embedding.shape) == 3:
-        sample_size = 10000
+        sample_size = 7000
         seq_length = embedding.shape[1]
         rnd_samples = np.random.randint(embedding.shape[0], size=sample_size)
-        rnd_labels = [[labels[i]]*embedding.shape[1] for i in rnd_samples]
-        rnd_labels = [label for sent in rnd_labels for label in sent]
         # flatten tensors and reduce size since otherwise not feasible for PCA
         embedding = embedding[rnd_samples]
         embedding = embedding.reshape(-1,model.enc_size)
         prototypes = prototypes.reshape(-1,model.enc_size)
+        mask = (mask[rnd_samples] > 0).reshape(-1)
+        rnd_labels = [[labels[i]] * seq_length for i in rnd_samples]
+        rnd_labels = [label for sent in rnd_labels for label in sent]
         # subsample again for plot
-        rnd_samples = ((np.random.randint(sample_size, size=35) * seq_length).reshape(-1,1) + np.arange(seq_length)).reshape(-1)
-        rnd_labels = np.array(rnd_labels)[rnd_samples].tolist()
+        rnd_samples = ((np.random.randint(sample_size, size=50) * seq_length).reshape(-1,1) + np.arange(seq_length)).reshape(-1)
+        rnd_labels = np.array(rnd_labels)[rnd_samples]
+        rnd_labels = rnd_labels[mask[rnd_samples]].tolist()
+        rnd_samples = rnd_samples[mask[rnd_samples]]
 
     if args.trans_type == 'PCA':
         pca = PCA(n_components=2)
         pca.fit(embedding)
-        print("Explained variance ratio of components after transform: ", pca.explained_variance_ratio_)
+        print('Explained variance ratio of components after transform: ', pca.explained_variance_ratio_)
         embed_trans = pca.transform(embedding)
         proto_trans = pca.transform(prototypes)
     elif args.trans_type == 'TSNE':
@@ -194,7 +107,7 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
 
     n = 0
     for i in range(args.num_prototypes):
-        txt = "P" + str(i + 1)
+        txt = 'P' + str(i + 1)
         if args.proto_size == 1:
             ax.annotate(txt, (proto_trans[i, 0], proto_trans[i, 1]), color='black')
         elif args.proto_size > 1:
@@ -206,6 +119,39 @@ def visualize_protos(args, embedding, labels, prototypes, model, proto_labels):
     prefix = 'interacted_' if 'interacted' in args.model_path else ''
     fig.savefig(os.path.join(os.path.dirname(args.model_path), prefix+args.trans_type+'proto_vis2D.png'))
 
+def bubble(args, train_batches_unshuffled, model, text_train):
+    # describe prototype by local context
+
+    attn_mask, argmin_dist, prototype_distances = [], [], []
+    for batch, mask, _ in train_batches_unshuffled:
+        batch = batch.to(f'cuda:{args.gpu[0]}')
+        mask = mask.to(f'cuda:{args.gpu[0]}')
+        distances, attn_w = model.get_dist(batch, mask)
+        # argmin_dist.append(torch.cat([torch.argmin(d, dim=2) for d in distances], dim=1))
+        prototype_distances.append(torch.cat([torch.min(d, dim=2)[0] for d in distances], dim=1))
+        attn_mask.append(attn_w)
+    attn_mask = torch.cat(attn_mask, dim=0)
+    prototype_distances = torch.cat(prototype_distances, dim=0)
+    # argmin_dist = torch.cat(argmin_dist, dim=0)
+    # for i, n in enumerate(nearest_sent):
+    #     nearest_conv.append(argmin_dist[n, i].cpu().numpy())
+
+    k=8 # top neighbors to be regarded
+    nearest_similarity, nearest_sent = prototype_distances.topk(k=k, largest=False, dim=0)
+    text_tknzd = model.tokenizer(text_train, return_tensors='pt', padding=True, add_special_tokens=False).input_ids
+    proto_texts = []
+    for i in range(args.num_prototypes):
+        for j in range(args.proto_size):
+            proto_texts.append(f'P{i + 1}.{j + 1} |')
+            for l in range(k):
+                if nearest_similarity[l,i] < -0.8:
+                    nearest_word = attn_mask[nearest_sent[l,i], j]
+                    token2text = model.tokenizer.decode(text_tknzd[nearest_sent[l,i],nearest_word].tolist())
+                    proto_texts[-1] += f' {token2text}'
+    # remove stopwords? only add "meaningful" words
+    # remove redundant words
+    proto_texts = [' '.join(sorted(set(t.split()), key=lambda x: t.index(x))) for t in proto_texts]
+    return proto_texts
 
 def proto_loss(prototype_distances, label, model, args):
     if args.class_specific:
@@ -246,12 +192,115 @@ def proto_loss(prototype_distances, label, model, args):
         # limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
         # dist_sum += torch.maximum(limit, dist)
         dist_sum -= torch.mean(F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :],dim=0))
-    # if distance small -> higher penalty
+    # if distance small i.e. similarity high -> higher penalty
     divers_loss = - dist_sum / comb.size(0)
 
     l1_loss = model.fc.weight.data.norm(p=1)
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
+
+#### interaction methods ######
+
+def finetune_prototypes(args, protos2finetune, model):
+    # # if mode == 'weights':
+    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
+    # gradient_mask_fc = torch.zeros(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+    # gradient_mask_fc[:,protos2finetune] = 1
+    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+    # if mode == 'prototypes':
+    # also, do not update the selected prototypes which should be kept
+    gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
+    gradient_mask_proto[protos2finetune, :, :] = 1
+    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
+    return model
+
+def reinit_prototypes(args, protos2reinit, model):
+    # reinitialize selected prototypes
+    model.protolayer.data[protos2reinit,:] = nn.init.uniform_(torch.empty(model.protolayer.size()))[protos2reinit,:]
+    # onyl retrain reinitialized protos and set gradients of other prototypes to zero
+    model = finetune_prototypes(args, protos2reinit, model)
+    return model
+
+def add_prototypes(args, protos2add, model):
+    # reassign protolayer, add new ones
+    args = adjust_cl_ids(args, protos2add[1])
+    protos2add = model.compute_embedding(protos2add[0], args)
+    protos2add = protos2add.view(-1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+    new_protos = torch.cat((model.protolayer.data,protos2add))
+    model.protolayer = nn.Parameter(new_protos,requires_grad=True)
+    # reassign last layer, add new ones
+    weights2keep = model.fc.weight.data.detach().clone()
+    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
+    new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
+    model.fc.data = torch.cat((weights2keep, new_weights), dim=1)
+    args.num_prototypes = args.num_prototypes + len(protos2add)
+    args, model = update_params(args, model)
+    return args, model
+
+def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=True):
+    # prune number of prototypes, the ones that do not have high weight wrt max weight are discarded
+    if use_weight:
+        w_max = torch.max(abs(model.fc.weight.data)) * 0.1
+        for i in range(args.num_prototypes):
+            if (abs(model.fc.weight.data[0,i]) < w_max) and (abs(model.fc.weight.data[1,i]) < w_max):
+                protos2remove.append(i)
+    # if prototypes are too close/ similar throw away
+    if use_cos:
+        comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
+        for k, l in comb:
+            similarity = F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :], dim=0)
+            similarity = torch.sum(similarity) / args.proto_size
+            if similarity>0.9:
+                protos2remove.append(int(k))
+
+    # make list items unique
+    protos2remove = list(set(protos2remove))
+    protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
+    args.prototype_class_identity =  args.prototype_class_identity[protos2keep,:]
+    # reassign protolayer, remove unneeded ones and only keep useful ones
+    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=True)
+    weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
+    model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
+    model.fc.weight.data = weights2keep
+    args.num_prototypes = args.num_prototypes - len(protos2remove)
+    args, model = update_params(args, model)
+    return args, model
+
+def prune_prototypes(args, proto_texts, model):
+    # define stop words, but e.g. 'not' should not be removed
+    stop_words = set(stopwords.words('english')) - {'not', 'no'}
+    pruned_protos = []
+
+    # remove stop words, non alpha words, single character words and punctuation
+    for p in proto_texts:
+        p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
+        pruned_protos.append(TreebankWordDetokenizer().detokenize([w for w in p.split() if w.isalpha()
+                                                                   and not w in stop_words and len(w)>1]))
+    new_prototypes = model.compute_embedding(pruned_protos, args)[0].to(f'cuda:{args.gpu[0]}')
+    if len(new_prototypes.size()) < 3: new_prototypes.unsqueeze_(-1)
+    # only assign new prototypes if cosine similarity to old one is close
+    angle =  F.cosine_similarity(model.protolayer, new_prototypes)
+    mask = (angle>0.85).squeeze()
+
+    # further reduce length if possible
+    for i in range(args.num_prototypes):
+        if len(pruned_protos[i])>4:
+            new_prototxts_ = " ".join(pruned_protos[i].split()[0:4])
+        else:
+            new_prototxts_ = pruned_protos[i]
+        new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
+        angle_ = F.cosine_similarity(model.protolayer[i].T, new_prototypes_)
+        if angle_>0.85:
+            pruned_protos[i] = new_prototxts_
+            new_prototypes[i] = new_prototypes_.T
+
+    # mask: replace only words with high cos sim
+    for i,m in enumerate(mask):
+        if m: proto_texts[i] = pruned_protos[i]
+    # assign new prototypes and don't update them when retraining
+    model.protolayer.data[mask] = new_prototypes[mask]
+    model.protolayer.requires_grad = False
+    return model, proto_texts
 
 ####################################################
 ###### load toxicity data ##########################
@@ -259,9 +308,9 @@ def proto_loss(prototype_distances, label, model, args):
 
 def parse_prompts_and_continuation(tag, discrete=True, discard=False, remove_long=True, file_dir=None):
     if file_dir is None:
-        dataset_file = "./data/realtoxicityprompts/prompts.jsonl"
+        dataset_file = './data/realtoxicityprompts/prompts.jsonl'
     else:
-        dataset_file = file_dir + "/prompts.jsonl"
+        dataset_file = file_dir + '/prompts.jsonl'
 
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
@@ -282,10 +331,10 @@ def parse_prompts_and_continuation(tag, discrete=True, discard=False, remove_lon
 
 def parse_full(tag, args, discrete=True, discard=False, remove_long=True, file_dir=None):
     if file_dir is None:
-        dataset_file = "./data/realtoxicityprompts/full data.jsonl"
-        file_dir = "./data/realtoxicityprompts"
+        dataset_file = './data/realtoxicityprompts/full data.jsonl'
+        file_dir = './data/realtoxicityprompts'
     else:
-        dataset_file = file_dir + "/full data.jsonl"
+        dataset_file = file_dir + '/full data.jsonl'
 
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
@@ -320,7 +369,7 @@ def parse_all(tag, args, file_dir=None):
     text_, labels_ = parse_full(tag, args, discard=args.discard, file_dir=file_dir)
     text += text_
     labels += labels_
-    file_dir = os.path.join(args.data_dir, "realtoxicityprompts")
+    file_dir = os.path.join(args.data_dir, 'realtoxicityprompts')
     pickle.dump(text, open(file_dir + '/text.pkl', 'wb'))
     pickle.dump(labels, open(file_dir + '/labels.pkl', 'wb'))
     return text, labels
@@ -352,7 +401,7 @@ def preprocessor_toxic(text, labels, discrete, discard, remove_long):
 
 def get_toxicity(args):
     f = '_full' if args.data_name == 'toxicity_full' else ''
-    data_name = "realtoxicityprompts"
+    data_name = 'realtoxicityprompts'
     set_dir = os.path.join(args.data_dir, data_name)
     text = pickle.load(open(set_dir + '/text' + f + '.pkl', 'rb'))
     labels = pickle.load(open(set_dir + '/labels' + f + '.pkl', 'rb'))
@@ -393,9 +442,9 @@ def convert_label(labels):
 def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
     set_dir = os.path.join(args.data_dir, args.data_name)
     if file_dir is None:
-        dataset_file = os.path.join(set_dir, "yelp_academic_dataset_review.json")
+        dataset_file = os.path.join(set_dir, 'yelp_academic_dataset_review.json')
     else:
-        dataset_file = file_dir + "/yelp_academic_dataset_review.json"
+        dataset_file = file_dir + '/yelp_academic_dataset_review.json'
     assert os.path.isfile(dataset_file)
     dataset = pd.read_json(dataset_file, lines=True)
     text = dataset['text'].tolist()
@@ -456,13 +505,21 @@ def load_data(args):
 ###### load/ store embedding to not compute it every single run again ######
 
 def load_embedding(args, fname, set_name):
-    path = os.path.join('data/embedding', args.data_name, fname+'_'+set_name+'.pt')
-    assert os.path.isfile(path)
-    return torch.load(path, map_location=torch.device('cpu'))
-
-def save_embedding(embedding, args, fname, set_name):
     path = os.path.join('data/embedding', args.data_name)
-    name = fname + '_' + set_name + '.pt'
+    name = fname + '_' + set_name
+    path_e = os.path.join(path, name + '.pt')
+    assert os.path.isfile(path_e)
+    path_m = os.path.join(path, name + '_mask.pt')
+    assert os.path.isfile(path_m)
+    embedding = torch.load(path_e, map_location=torch.device('cpu'))
+    mask = torch.load(path_m, map_location=torch.device('cpu'))
+    return embedding, mask
+
+def save_embedding(embedding, mask, args, fname, set_name):
+    path = os.path.join('data/embedding', args.data_name)
     os.makedirs(path, exist_ok=True, mode=0o777)
-    path = os.path.join(path, name)
-    torch.save(embedding, path)
+    name = fname + '_' + set_name
+    path_e = os.path.join(path, name + '.pt')
+    torch.save(embedding, path_e)
+    path_m = os.path.join(path, name + '_mask.pt')
+    torch.save(mask, path_m)
