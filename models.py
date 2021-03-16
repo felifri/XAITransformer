@@ -24,7 +24,12 @@ class ProtoNet(nn.Module):
                                                              requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
-    def forward(self, embedding):
+    def forward(self, embedding, _):
+        prototype_distances = self.compute_distance(embedding)
+        class_out = self.fc(prototype_distances)
+        return prototype_distances, class_out
+
+    def compute_distance(self, embedding):
         if self.metric == 'L2':
             prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
             prototype_distances = - dist2similarity(prototype_distances)
@@ -34,9 +39,11 @@ class ProtoNet(nn.Module):
             p = self.protolayer.view(1, self.num_prototypes, self.enc_size)
             # negative since loss minimizes and we want to maximize the similarity
             prototype_distances = - F.cosine_similarity(embedding, p, dim=-1)
+        return prototype_distances
 
-        class_out = self.fc(prototype_distances)
-        return prototype_distances, prototype_distances, class_out
+    def get_dist(self, embedding, mask):
+        distances = self.compute_distance(embedding)
+        return distances, []
 
     def get_protos(self):
         return self.protolayer.squeeze()
@@ -48,15 +55,15 @@ class ProtoNet(nn.Module):
         embedding = self.LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu()
         if len(embedding.size()) == 1:
             embedding.unsqueeze_(0)
-        return embedding
+        return embedding, []    # empty for mask
 
     @staticmethod
-    def nearest_neighbors(distances, text_train, labels_train):
+    def nearest_neighbors(distances, _, text_train, labels_train):
         distances = torch.cat(distances)
         _, nearest_ids = torch.topk(distances, 1, dim=0, largest=False)
-        proto_id = [f"P{proto+1} | sentence {index} | label {labels_train[index]} | text: " for proto, sent
+        proto_id = [f'P{proto+1} | sentence {index} | label {labels_train[index]} | text: ' for proto, sent
                     in enumerate(nearest_ids.cpu().numpy().T) for index in sent]
-        proto_texts = [f"{text_train[index]}" for sent in nearest_ids.cpu().numpy().T for index in sent]
+        proto_texts = [f'{text_train[index]}' for sent in nearest_ids.cpu().numpy().T for index in sent]
         return proto_id, proto_texts
 
 
@@ -107,6 +114,7 @@ class ProtoPNet(nn.Module):
                 )
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((args.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
+        self.attention = nn.MultiheadAttention(self.enc_size, num_heads=4)
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -117,18 +125,19 @@ class ProtoPNet(nn.Module):
     def compute_embedding(self, x, args):
         bs = 10 # divide data by a batch size if too big for memory to process embedding at once
         word_embedding = []
-        inputs = self.tokenizer(x, return_tensors="pt", padding=True, add_special_tokens=False)
+        inputs = self.tokenizer(x, return_tensors='pt', padding=True, add_special_tokens=False)
         inputs_ = {'input_ids': [], 'attention_mask': []}
+        attn_mask = inputs['attention_mask']
         for i in range(0,len(x),bs):
             inputs_['input_ids'] = inputs['input_ids'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             inputs_['attention_mask'] = inputs['attention_mask'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             outputs = self.LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
             if args.avoid_spec_token:
                 # set embedding values of PAD token to 0 or a high number to make it "unlikely regarded" in distance computation
-                outputs[0][inputs_['attention_mask'] == 0] = 0
+                outputs[0][inputs_['attention_mask'] == 0] = 0 #10
             word_embedding.extend(outputs[0].cpu())
         embedding = torch.stack(word_embedding, dim=0)
-        return embedding
+        return embedding, attn_mask
 
 
 class ProtoPNetConv(ProtoPNet):
@@ -141,20 +150,31 @@ class ProtoPNetConv(ProtoPNet):
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((self.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
 
-    def forward(self, embedding):
+    def forward(self, embedding, mask):
         # embedding = self.emb_trafo(embedding)
+        embedding, top_w =  self.compute_attention(embedding, mask)
         distances = self.compute_distance(embedding)
         prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
-        # similarity = dist2similarity(prototype_distances)
-        # class_out = self.fc(similarity)
         class_out = self.fc(prototype_distances)
-        return prototype_distances, distances, class_out
+        return prototype_distances, class_out
+
+    def compute_attention(self, embedding, mask):
+        bs = embedding.shape[0]
+        embedding = embedding.permute(1,0,2)
+        mask = (mask < 1)
+        _, w_attention = self.attention(embedding, embedding, embedding, key_padding_mask=mask)
+        w_attention = w_attention.mean(dim=1)
+        _, top_w = w_attention.topk(k=self.proto_size)
+        top_w, _ = top_w.sort(dim=1) # keep original order
+        embedding = embedding.permute(1,0,2)
+        # reduce each sequence from seq_len to 5, pool only top 5 most attended words
+        embedding = embedding[torch.arange(bs).unsqueeze(-1), top_w, :]
+        return embedding, top_w
 
     def compute_distance(self, batch):
         N, S = batch.shape[0:2]  # Batch size, Sequence length
         E = self.enc_size  # Encoding size
         K = self.proto_size  # Patch length
-
         distances, j = [], 0
         for d, n in zip(self.dilated, self.num_filters):
             H = S - d * (K - 1)  # Number of patches
@@ -176,34 +196,47 @@ class ProtoPNetConv(ProtoPNet):
 
         return distances
 
-    def nearest_neighbors(self, distances, text_train, labels_train):
+    def get_dist(self, embedding, mask):
+        embedding, top_w =  self.compute_attention(embedding, mask)
+        distances = self.compute_distance(embedding)
+        return distances, top_w
+
+    def nearest_neighbors(self, distances, top_w, text_train, labels_train):
         argmin_dist, prototype_distances, nearest_conv =  [], [], []
-        # compute min and argmin value in each sentence for each prototype
-        for d in distances:
-            argmin_dist.append(torch.cat([torch.argmin(dist, dim=2) for dist in d], dim=1))
-            prototype_distances.append(torch.cat([torch.min(dist, dim=2)[0] for dist in d], dim=1))
+        # compute min and argmin value in each sentence for each prototype.
+        # remove the dilation dimension, num_dilations x [batch x num_proto x num_convolutions] to [b x #p x #conv]
+        for batch in distances:
+            # id of conv per sentence that achieves lowest distance
+            argmin_dist.append(torch.cat([torch.argmin(dilated, dim=2) for dilated in batch], dim=1))
+            # value of conv per sentence that achieves lowest distance
+            prototype_distances.append(torch.cat([torch.min(dilated, dim=2)[0] for dilated in batch], dim=1))
+        # compute nearest sentence id
         prototype_distances = torch.cat(prototype_distances, dim=0)
-        # compute nearest sentence id and look up nearest convolution id in this sentence for each prototype
         nearest_sent = torch.argmin(prototype_distances, dim=0).cpu().numpy()
+        # look up nearest convolution id in nearest sentence for each prototype
         argmin_dist = torch.cat(argmin_dist, dim=0)
         for i,n in enumerate(nearest_sent):
             nearest_conv.append(argmin_dist[n,i].cpu().numpy())
 
         # get text for prototypes
         text_nearest, nearest_words, proto_texts, proto_ids = [], [], [], []
-        text_tknzd = self.tokenizer(text_train, return_tensors="pt", padding=True, add_special_tokens=False).input_ids
-        j = 0
-        for d, n in zip(self.dilated, self.num_filters):
-            # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
-            # add padding required by convolution
-            nearest_words.extend([[word_id + x*d for x in range(self.proto_size)] for word_id in nearest_conv[j:j+n]])
-            text_nearest.extend(text_tknzd[nearest_sent[j:j+n]])
-            j += n
+        text_tknzd = self.tokenizer(text_train, return_tensors='pt', padding=True, add_special_tokens=False).input_ids
+        # j = 0
+        # for d, n in zip(self.dilated, self.num_filters):
+        #     # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
+        #     # add padding required by convolution
+        #     nearest_words.extend([[word_id + x*d for x in range(self.proto_size)] for word_id in nearest_conv[j:j+n]])
+        #     text_nearest.extend(text_tknzd[nearest_sent[j:j+n]])
+        #     j += n
+
+        top_w = torch.cat(top_w, dim=0)
+        nearest_words = top_w[nearest_sent]
+        text_nearest = text_tknzd[nearest_sent]
 
         for i, (s_index, w_indices) in enumerate(zip(nearest_sent, nearest_words)):
             token2text = self.tokenizer.decode(text_nearest[i][w_indices].tolist())
-            proto_ids.append(f"P{i+1} | sentence {s_index} | label {labels_train[s_index]} | text: {text_train[s_index]}| proto: ")
-            proto_texts.append(f"{token2text}")
+            proto_ids.append(f'P{i+1} | sentence {s_index} | label {labels_train[s_index]} | text: {text_train[s_index]}| proto: ')
+            proto_texts.append(f'{token2text}')
 
         return proto_ids, proto_texts
 
