@@ -7,6 +7,7 @@ import random
 import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from rtpt import RTPT
@@ -359,14 +360,15 @@ if __name__ == '__main__':
     text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
                                                                     stratify=labels_test, random_state=12)
 
-    # set class weights for balanced cross entropy computation
-    balance = labels.count(0) / len(labels)
-    args.class_weights = [1-balance, balance]
+    # set class weights for balanced loss computation
+    args.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(labels), y=labels)
 
+    if args.num_prototypes % args.num_classes:
+        print('number of prototpyes should be divisible by number of classes')
+        args.num_prototypes -= args.num_prototypes % args.num_classes
     # define which prototype belongs to which class (onehot encoded matrix)
-    args.prototype_class_identity = torch.zeros(args.num_prototypes, args.num_classes).to(f'cuda:{args.gpu[0]}')
-    args.prototype_class_identity[::2,0] = 1
-    args.prototype_class_identity[1::2,1] = 1
+    args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes//args.num_classes, 1
+                                                                       ).to(f'cuda:{args.gpu[0]}')
     # protos_per_class = round(balance*args.num_prototypes)
     # args.prototype_class_identity[:protos_per_class, 0] = 1
     # args.prototype_class_identity[protos_per_class:, 1] = 1

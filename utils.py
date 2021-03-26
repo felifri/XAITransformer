@@ -513,7 +513,6 @@ def get_restaurant(args):
 ####################################################
 
 def load_data(args):
-    texts, labels = [], []
     if args.data_name == 'toxicity' or args.data_name == 'toxicity_full':
         texts, labels = get_toxicity(args)
     elif args.data_name == 'rt-polarity':
