@@ -19,8 +19,6 @@ words = set(nltk.corpus.words.words())
 
 # __import__("pdb").set_trace()
 
-#### real utils ##############
-
 def dist2similarity(distance):
     # turn distance into similarity. if distance is very small we have value ~1, if distance is infinite we have 0.
     # something like cosine. Also scale distance by 0.01 to not get too small values.
@@ -45,13 +43,14 @@ def update_params(args, model):
 def get_nearest(args, model, train_batches_unshuffled, text_train, labels_train):
     model.eval()
     dist, w = [], []
-    for batch, mask, _ in train_batches_unshuffled:
-        batch = batch.to(f'cuda:{args.gpu[0]}')
-        mask = mask.to(f'cuda:{args.gpu[0]}')
-        distances, top_w = model.get_dist(batch, mask)
-        dist.append(distances)
-        w.append(top_w)
-    proto_ids, proto_texts = model.nearest_neighbors(dist, w, text_train, labels_train)
+    with torch.no_grad():
+        for batch, mask, _ in train_batches_unshuffled:
+            batch = batch.to(f'cuda:{args.gpu[0]}')
+            mask = mask.to(f'cuda:{args.gpu[0]}')
+            distances, top_w = model.get_dist(batch, mask)
+            dist.append(distances)
+            w.append(top_w)
+        proto_ids, proto_texts = model.nearest_neighbors(dist, w, text_train, labels_train)
     return proto_ids, proto_texts
 
 def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_labels):
@@ -100,7 +99,7 @@ def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_lab
     for cl in range(args.num_classes):
         ix = np.where(np.array(rnd_labels) == cl)[0]
         ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.3)
-        ix = np.where(proto_labels[:,cl].cpu().numpy() == 1)[0]
+        ix = np.where(proto_labels[:,cl].cpu().detach().numpy() == 1)[0]
         if args.proto_size > 1:
             ix = [args.proto_size * i + x for i in ix.tolist() for x in range(args.proto_size)]
         ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=80)
@@ -134,7 +133,7 @@ def bubble(args, train_batches_unshuffled, model, text_train):
     prototype_distances = torch.cat(prototype_distances, dim=0)
     # argmin_dist = torch.cat(argmin_dist, dim=0)
     # for i, n in enumerate(nearest_sent):
-    #     nearest_conv.append(argmin_dist[n, i].cpu().numpy())
+    #     nearest_conv.append(argmin_dist[n, i].cpu().detach().numpy())
 
     k=8 # top neighbors to be regarded
     nearest_similarity, nearest_sent = prototype_distances.topk(k=k, largest=False, dim=0)
@@ -144,7 +143,7 @@ def bubble(args, train_batches_unshuffled, model, text_train):
         for j in range(args.proto_size):
             proto_texts.append(f'P{i + 1}.{j + 1} |')
             for l in range(k):
-                if nearest_similarity[l,i] < -0.8:
+                if nearest_similarity[l,i] < -0.5:
                     nearest_word = attn_mask[nearest_sent[l,i], j]
                     token2text = model.tokenizer.decode(text_tknzd[nearest_sent[l,i],nearest_word].tolist())
                     proto_texts[-1] += f' {token2text}'
@@ -237,12 +236,12 @@ def add_prototypes(args, protos2add, model):
     args, model = update_params(args, model)
     return args, model
 
-def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=True):
+def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=False):
     # prune number of prototypes, the ones that do not have high weight wrt max weight are discarded
     if use_weight:
-        w_max = torch.max(abs(model.fc.weight.data)) * 0.1
+        w_limit = torch.max(abs(model.fc.weight.data)) * 0.3
         for i in range(args.num_prototypes):
-            if (abs(model.fc.weight.data[0,i]) < w_max) and (abs(model.fc.weight.data[1,i]) < w_max):
+            if (abs(model.fc.weight.data[0,i]) < w_limit) and (abs(model.fc.weight.data[1,i]) < w_limit):
                 protos2remove.append(i)
     # if prototypes are too close/ similar throw away
     if use_cos:
@@ -258,7 +257,7 @@ def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=True
     protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
     args.prototype_class_identity =  args.prototype_class_identity[protos2keep,:]
     # reassign protolayer, remove unneeded ones and only keep useful ones
-    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:],requires_grad=True)
+    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:], requires_grad=True)
     weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
     model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
     model.fc.weight.data = weights2keep
@@ -406,6 +405,28 @@ def get_toxicity(args):
     text = pickle.load(open(set_dir + '/text' + f + '.pkl', 'rb'))
     labels = pickle.load(open(set_dir + '/labels' + f + '.pkl', 'rb'))
     return text, labels
+
+####################################################
+###### load ethics data ############################
+####################################################
+
+def preprocess_ethics(args):
+    set_dir = os.path.join(args.data_dir, args.data_name, 'commonsense')
+    set_names = ['/cm_train.csv', '/cm_test.csv']#, '/cm_test_hard.csv'
+    df = pd.concat((pd.read_csv(set_dir+set_name) for set_name in set_names))
+    sub = df.loc[df["is_short"]==True]
+    text = sub["input"].tolist()
+    labels = sub["label"].tolist()
+
+    pickle.dump(text, open(set_dir + '/text.pkl', 'wb'))
+    pickle.dump(labels, open(set_dir + '/labels.pkl', 'wb'))
+
+def get_ethics(args):
+    set_dir = os.path.join(args.data_dir, args.data_name, 'commonsense')
+    text = pickle.load(open(set_dir + '/text.pkl', 'rb'))
+    labels = pickle.load(open(set_dir + '/labels.pkl', 'rb'))
+    return text, labels
+
 ####################################################
 ###### load movie review data ######################
 ####################################################
@@ -497,6 +518,8 @@ def load_data(args):
         texts, labels = get_toxicity(args)
     elif args.data_name == 'rt-polarity':
         texts, labels = get_reviews(args)
+    elif args.data_name == 'ethics':
+        texts, labels = get_ethics(args)
     elif args.data_name == 'restaurant':
         texts, labels = get_restaurant(args)
     return texts, labels
