@@ -75,8 +75,8 @@ parser.add_argument('--metric', type=str, default='cosine', choices=['cosine','L
                     help='What metric should be used to compute the distance/ similarity?')
 parser.add_argument('--attn', type=str, default=False,
                     help='Whether to use self-attention on the word embeddings before distance computation')
-parser.add_argument('--auto_prune', type=str, default=False,
-                    help='Whether to remove/prune automatically low weight prototypes after 70% of train epochs')
+parser.add_argument('--project', type=str, default=False,
+                    help='Whether to project the prototypes on their nearest neighbor after x epochs')
 
 def train(args, train_batches, val_batches, model):
     num_epochs = args.num_epochs
@@ -186,15 +186,15 @@ def train(args, train_batches, val_batches, model):
                     best_acc = acc_val
                     state = {'state_dict': model.state_dict(), 'hyper_params': args, 'acc_val': acc_val}
 
-        # if (epoch + 1) == (num_epochs * 8 // 10):
-        #     with torch.no_grad():
-        #         best_acc = 0
-        #         # project prototypes
-        #         _, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
-        #         new_proto, _ = model.compute_embedding(proto_texts, args)
-        #         model.protolayer.copy_(new_proto)
-        #         model.protolayer.requires_grad = False
-        # if (epoch + 1) == (num_epochs * 7 // 10):
+        if (epoch + 1) == (num_epochs * 8 // 10) and args.project:
+            with torch.no_grad():
+                best_acc = 0
+                # project prototypes
+                _, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+                new_proto, _ = model.compute_embedding(proto_texts, args)
+                model.protolayer.copy_(new_proto)
+                model.protolayer.requires_grad = False
+        # if (epoch + 1) == (num_epochs * 7 // 10)  and args.project:
         #     with torch.no_grad():
         #         # __import__("pdb").set_trace()
         #         # project prototypes

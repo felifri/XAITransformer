@@ -197,10 +197,10 @@ def proto_loss(prototype_distances, label, model, args):
     # divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:,comb][:,:,0], model.protolayer[:,comb][:,:,1]).clamp(min=0))
     if args.metric == 'cosine':
         divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:,comb][:,:,0],
-                                                     model.protolayer[:,comb][:,:,1]).squeeze().clamp(min=0.3))
+                                                     model.protolayer[:,comb][:,:,1]).squeeze().clamp(min=0.8))
     elif args.metric == 'L2':
         divers_loss = torch.mean(nes_torch(model.protolayer[:,comb][:,:,0],
-                                           model.protolayer[:,comb][:,:,1], dim=2).squeeze().clamp(min=0.3))
+                                           model.protolayer[:,comb][:,:,1], dim=2).squeeze().clamp(min=0.8))
 
     # l1 loss on classification layer weights, scaled by number of prototypes
     l1_loss = model.fc.weight.norm(p=1) / args.num_prototypes
@@ -413,8 +413,20 @@ def parse_all(tag, args, file_dir=None):
 
 def preprocessor_toxic(text, labels, discrete, discard, remove_long):
     if remove_long:
-        labels = list([l for t, l in zip(text, labels) if len(t.split())<=25])
-        text = list([t for t in text if len(t.split())<=25])
+        txt = []
+        lbl = []
+        # assures that not too long sequences are used especially required for Clip model
+        import clip
+        for t, l in zip(text, labels):
+            try:
+                clip.tokenize(t)
+                if len(nltk.word_tokenize(t)) <= 30:
+                    txt.append(t)
+                    lbl.append(l)
+            except:
+                pass
+        text = txt
+        labels = lbl
 
     if discard:
         text = list([t for t, l in zip(text, labels) if (l < 0.3 or l > 0.7)])
@@ -424,10 +436,10 @@ def preprocessor_toxic(text, labels, discrete, discard, remove_long):
         labels = [0 if l < 0.5 else 1 for l in labels]
 
     # remove non english words (some reviews in Chinese, etc.), but keep digits and punctuation
-    for i,t in enumerate(text):
-        text[i] = convert_language(t)
-        if not text[i]:
-            del text[i], labels[i]
+    # for i,t in enumerate(text):
+    #     text[i] = convert_language(t)
+    #     if not text[i]:
+    #         del text[i], labels[i]
 
     assert len(text) == len(labels)
     max_len = 200_000

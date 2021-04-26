@@ -65,7 +65,7 @@ class ProtoNet(nn.Module):
                 output = LM.encode_text(batch)
                 # output = LM.encode_image(batch)
                 embedding.append(output.cpu().detach().float())
-            embedding = torch.stack(embedding)
+            embedding = torch.cat(embedding, dim=0)
 
         for param in LM.parameters():
             param.requires_grad = False
