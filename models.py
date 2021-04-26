@@ -8,8 +8,9 @@ from transformers import TransfoXLTokenizer, TransfoXLModel, RobertaTokenizer, R
 import transformers
 import logging
 from transformers import BertForSequenceClassification
-from utils import dist2similarity
+from utils import dist2similarity, nes_torch
 import clip
+from slot_attention import SlotAttention
 
 
 class ProtoNet(nn.Module):
@@ -21,7 +22,7 @@ class ProtoNet(nn.Module):
         elif args.language_model == 'Clip':
             self.enc_size = 512
         self.metric = args.metric
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty(args.num_prototypes, self.enc_size, 1)),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty(1, args.num_prototypes, self.enc_size)),
                                                              requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
@@ -32,14 +33,11 @@ class ProtoNet(nn.Module):
 
     def compute_distance(self, embedding):
         if self.metric == 'L2':
-            prototype_distances = torch.cdist(embedding, self.protolayer.squeeze(), p=2)
-            prototype_distances = - dist2similarity(prototype_distances)
+            # prototype_distances = torch.cdist(embedding.float(), self.protolayer.squeeze(), p=2)
+            # prototype_distances = - dist2similarity(prototype_distances)
+            prototype_distances = - nes_torch(embedding.unsqueeze(1), self.protolayer, dim=-1)
         elif self.metric == 'cosine':
-            bs = embedding.size(0)  # Batch size
-            embedding = embedding.view(bs, 1, self.enc_size)
-            p = self.protolayer.view(1, self.num_prototypes, self.enc_size)
-            # negative since loss minimizes and we want to maximize the similarity
-            prototype_distances = - F.cosine_similarity(embedding, p, dim=-1)
+            prototype_distances = - F.cosine_similarity(embedding.unsqueeze(1), self.protolayer, dim=-1)
         return prototype_distances
 
     def get_dist(self, embedding, _):
@@ -57,21 +55,22 @@ class ProtoNet(nn.Module):
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
-            LM, _ = clip.load('ViT-B/32', f'cuda:{args.gpu[0]}')
-            tknzd_x = clip.tokenize(x)
-            batches = torch.utils.data.DataLoader(tknzd_x, batch_size=200, shuffle=False)
+            LM, preprocess = clip.load('ViT-B/32', f'cuda:{args.gpu[0]}')
+            # x = preprocess(x).unsqueeze(0)
+            x = clip.tokenize(x)
+            batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
             embedding = []
             for batch in batches:
                 batch = batch.to(f'cuda:{args.gpu[0]}')
                 output = LM.encode_text(batch)
-                embedding.append(output.cpu().detach())
+                # output = LM.encode_image(batch)
+                embedding.append(output.cpu().detach().float())
+            embedding = torch.stack(embedding)
 
-            embedding = torch.cat(embedding, dim=0)
-
-        for param in self.LM.parameters():
+        for param in LM.parameters():
             param.requires_grad = False
         if len(embedding.size()) == 1:
-            embedding.unsqueeze_(0)
+            embedding = embedding.unsqueeze(0).unsqueeze(0)
         mask = torch.ones(embedding.shape) # required for attention models
         return embedding, mask
 
@@ -89,11 +88,12 @@ class BaseNet(ProtoNet):
     def __init__(self, args):
         super(BaseNet, self).__init__(args)
         self.fc = nn.Sequential(
-            nn.Linear(self.enc_size, 20),
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(20, args.num_classes, bias=False),
+            nn.Linear(self.enc_size, args.num_prototypes),
+            nn.Dropout(p=0.5),
+            nn.Linear(args.num_prototypes, args.num_classes, bias=False),
         )
+        del self.protolayer
+
 
     def forward(self, embedding, _):
         return self.fc(embedding)
@@ -128,6 +128,8 @@ class ProtoPNet(nn.Module):
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty(args.num_prototypes, self.enc_size, self.proto_size)),
                                        requires_grad=True)
         self.attention = nn.MultiheadAttention(self.enc_size, num_heads=1)
+        self.slots = min(9, self.proto_size*2)
+        self.slot_attention = SlotAttention(num_slots = self.slots, dim = self.enc_size)
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -161,8 +163,11 @@ class ProtoPNet(nn.Module):
             outputs = LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
             if args.avoid_spec_token:
                 # set embedding values of PAD token to 0 or a high number to make it "unlikely regarded" in distance computation
-                outputs[0][inputs_['attention_mask'] == 0] = 0 #10
-            word_embedding.extend(outputs[0].cpu().detach())
+                # outputs[0][inputs_['attention_mask'] == 0] = 0 #10
+                inputs_['attention_mask'][inputs_['attention_mask'] == 0] = 1e1
+                word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
+            else:
+                word_embedding.extend(outputs[0].cpu().detach())
         embedding = torch.stack(word_embedding, dim=0)
         return embedding, attn_mask
 
@@ -174,29 +179,35 @@ class ProtoPNetConv(ProtoPNet):
         self.attn = args.attn
         self.num_filters = [self.num_prototypes // len(self.dilated)] * len(self.dilated)
         self.num_filters[0] += self.num_prototypes % len(self.dilated)
-        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((self.num_prototypes, self.enc_size, self.proto_size))),
+        self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty((1, self.num_prototypes, self.enc_size, self.proto_size))),
                                        requires_grad=True)
 
     def forward(self, embedding, mask):
         # embedding = self.emb_trafo(embedding)
         if self.attn:
-            embedding, top_w =  self.compute_attention(embedding, mask)
+            embedding, _ =  self.compute_attention(embedding, mask)
         distances = self.compute_distance(embedding)
         prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
         class_out = self.fc(prototype_distances)
         return prototype_distances, class_out
 
     def compute_attention(self, embedding, mask):
-        bs = embedding.shape[0]
-        embedding = embedding.permute(1,0,2)
-        mask = (mask < 1)
-        _, w_attention = self.attention(embedding, embedding, embedding, key_padding_mask=mask)
-        w_attention = w_attention.mean(dim=1)
-        _, top_w = w_attention.topk(k=min(10,self.proto_size*2))
-        top_w, _ = top_w.sort(dim=1) # keep original order
-        embedding = embedding.permute(1,0,2)
-        # reduce each sequence from seq_len to 5, pool only top 5 most attended words
-        embedding = embedding[torch.arange(bs).unsqueeze(-1), top_w, :]
+        slot = False
+        top_w = []
+        if slot:
+            embedding = self.slot_attention(embedding)
+        else:
+            bs = embedding.shape[0]
+            embedding = embedding.permute(1,0,2)
+            mask = (mask < 1)
+            _, w_attention = self.attention(embedding, embedding, embedding, key_padding_mask=mask)
+            w_attention = w_attention.mean(dim=2)
+            _, top_w = w_attention.topk(k=self.slots)
+            # top_w = F.gumbel_softmax(w_attention)#.topk(k=min(9,self.proto_size*2))
+            top_w, _ = top_w.sort(dim=1) # keep original order
+            embedding = embedding.permute(1,0,2)
+            # reduce each sequence from seq_len to k, pool only top k most attended words
+            embedding = embedding[torch.arange(bs).unsqueeze(-1), top_w, :]
         return embedding, top_w
 
     def compute_distance(self, batch):
@@ -209,7 +220,9 @@ class ProtoPNetConv(ProtoPNet):
             C = c.shape[0]
             b = batch[:,c,:].view(N, 1, C, K * E)
             if self.metric == 'L2':
-                distances = torch.dist(b, p, p=2)
+                # distances = torch.norm(b - p, dim=-1, p=2)
+                # distances = - dist2similarity(distances)
+                distances = - nes_torch(b, p, dim=-1)
             elif self.metric == 'cosine':
                 distances = - F.cosine_similarity(b, p, dim=-1)
             distances = [distances]
@@ -224,8 +237,9 @@ class ProtoPNetConv(ProtoPNet):
                 p_ = p[:,j:j+n,:]
                 p_ = p_.view(1, n, 1, K * E)
                 if self.metric == 'L2':
-                    dist = torch.norm(x - p_, dim=-1)
-                    dist = - dist2similarity(dist)
+                    # dist = torch.norm(x - p_, dim=-1, p=2)
+                    # dist = - dist2similarity(dist)
+                    dist = - nes_torch(x, p, dim=-1)
                 elif self.metric == 'cosine':
                     # negative since loss minimizes and we want to maximize the similarity
                     dist = - F.cosine_similarity(x, p_, dim=-1)
@@ -283,25 +297,6 @@ class ProtoPNetConv(ProtoPNet):
         return proto_ids, proto_texts
 
 
-class BasePartsNet(ProtoPNet):
-    def __init__(self, args):
-        super(BasePartsNet, self).__init__(args)
-
-        self.fc1 = nn.Sequential(
-            nn.Linear(self.enc_size, 1),
-            # nn.Dropout(),
-            # nn.ReLU()
-        )
-        self.fc2 = nn.Sequential(
-            nn.Linear(args.seq_length, args.num_classes, bias=False),
-            # nn.Dropout(),
-            # nn.ReLU())
-        )
-
-    def forward(self, embedding):
-        return self.fc2(self.fc1(embedding).squeeze())
-
-
 def _from_pretrained(cls, *args, **kw):
     """Load a transformers model in PyTorch, with fallback to TF2/Keras weights."""
     try:
@@ -317,10 +312,10 @@ class BertForSequenceClassification2Layers(BertForSequenceClassification):
     def __init__(self, config):
         super().__init__(config)
         self.classifier = nn.Sequential(
-            nn.Linear(config.hidden_size, 20),
+            nn.Linear(config.hidden_size, 8),
             nn.Dropout(),
             nn.ReLU(),
-            nn.Linear(20, config.num_labels, bias=False),
+            nn.Linear(8, config.num_labels, bias=False),
         )
 
         self.init_weights()
@@ -328,7 +323,7 @@ class BertForSequenceClassification2Layers(BertForSequenceClassification):
 class BaseNetBERT(nn.Module):
     def __init__(self):
         super(BaseNetBERT, self).__init__()
-        self.model_name_or_path = 'bert-large'
+        self.model_name_or_path = 'bert-large-uncased'
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             self.model_name_or_path)
         model_config = transformers.AutoConfig.from_pretrained(
