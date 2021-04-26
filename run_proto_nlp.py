@@ -15,9 +15,10 @@ from transformers import get_linear_schedule_with_warmup
 
 from models import ProtoPNetConv, ProtoNet
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
-    get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, bubble
+    get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, bubble, nearest_image, \
+    replace_prototypes
 
-parser = argparse.ArgumentParser(description='Crazy Stuff')
+parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, prune, '
                          'add, remove, reinitialize.')
@@ -31,7 +32,8 @@ parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
-parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full', 'ethics', 'restaurant'],
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity',
+                                                                             'toxicity_full', 'ethics', 'restaurant'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -41,9 +43,9 @@ parser.add_argument('-l2','--lambda2', default=0.2, type=float,
                     help='Weight for prototype cluster loss')
 parser.add_argument('-l3','--lambda3', default=0.1, type=float,
                     help='Weight for prototype separation loss')
-parser.add_argument('-l4','--lambda4', default=0.3, type=float,
+parser.add_argument('-l4','--lambda4', default=0.1, type=float,
                     help='Weight for prototype diversity loss')
-parser.add_argument('-l5','--lambda5', default=1e-2, type=float,
+parser.add_argument('-l5','--lambda5', default=1e-3, type=float,
                     help='Weight for l1 weight regularization loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
@@ -51,7 +53,7 @@ parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--few_shot', type=bool, default=False,
                     help='Whether to use few-shot learning or not (i.e. only a few training examples)')
-parser.add_argument('--trans_type', type=str, default='UMAP', choices=['PCA', 'TSNE', 'UMAP'],
+parser.add_argument('--trans_type', type=str, default='PCA', choices=['PCA', 'TSNE', 'UMAP'],
                     help='Select transformation to visualize the prototypes')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
@@ -80,7 +82,7 @@ def train(args, train_batches, val_batches, model):
     num_epochs = args.num_epochs
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
-    scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
+    # scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
 
     print(f'\nStart training for {num_epochs} epochs\n')
     best_acc = 0
@@ -118,14 +120,14 @@ def train(args, train_batches, val_batches, model):
                    args.lambda4 * divers_loss + \
                    args.lambda5 * l1_loss
 
-            _, predicted = torch.max(predicted_label.data, 1)
+            _, predicted = torch.max(predicted_label, 1)
             all_preds += predicted.cpu().detach().numpy().tolist()
             all_labels += label_batch.cpu().detach().numpy().tolist()
 
             loss.backward()
             optimizer.step()
             with torch.no_grad():
-                model.fc.weight.copy_(model.fc.weight.data.clamp(max=0.0))
+                model.fc.weight.copy_(model.fc.weight.clamp(max=0.0))
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -135,7 +137,7 @@ def train(args, train_batches, val_batches, model):
             divers_loss_per_batch.append(float(args.lambda4 * divers_loss))
             l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
 
-        scheduler.step()
+        # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         distr_mean_loss = np.mean(distr_loss_per_batch)
@@ -148,11 +150,6 @@ def train(args, train_batches, val_batches, model):
               f'clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers {divers_mean_loss:.3f}, '
               f'l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}')
 
-        # auto prune number of prototypes
-        if (epoch + 1) == (num_epochs * 7 // 10) and args.auto_prune:
-            __import__("pdb").set_trace()
-            args, model = remove_prototypes(args, [], model, use_cos=False, use_weight=True)
-            best_acc = 0
         if ((epoch + 1) % args.val_epoch == 0) or (epoch + 1 == num_epochs):
             model.eval()
             all_preds = []
@@ -177,7 +174,7 @@ def train(args, train_batches, val_batches, model):
                            args.lambda5 * l1_loss
 
                     losses_per_batch.append(float(loss))
-                    _, predicted = torch.max(predicted_label.data, 1)
+                    _, predicted = torch.max(predicted_label, 1)
                     all_preds += predicted.detach().cpu().numpy().tolist()
                     all_labels += label_batch.cpu().detach().numpy().tolist()
 
@@ -185,13 +182,27 @@ def train(args, train_batches, val_batches, model):
                 acc_val = balanced_accuracy_score(all_labels, all_preds)
                 print(f'Validation: mean loss {loss_val:.3f}, acc_val {100 * acc_val:.3f}')
 
-            if acc_val > best_acc:
-                best_acc = acc_val
-                state = { 'state_dict': model.state_dict(),
-                    'hyper_params': args,
-                    'acc_val': acc_val,
-                }
+                if acc_val > best_acc:
+                    best_acc = acc_val
+                    state = {'state_dict': model.state_dict(), 'hyper_params': args, 'acc_val': acc_val}
 
+        # if (epoch + 1) == (num_epochs * 8 // 10):
+        #     with torch.no_grad():
+        #         best_acc = 0
+        #         # project prototypes
+        #         _, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+        #         new_proto, _ = model.compute_embedding(proto_texts, args)
+        #         model.protolayer.copy_(new_proto)
+        #         model.protolayer.requires_grad = False
+        # if (epoch + 1) == (num_epochs * 7 // 10):
+        #     with torch.no_grad():
+        #         # __import__("pdb").set_trace()
+        #         # project prototypes
+        #         _, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+        #         new_proto, _ = model.compute_embedding(proto_texts, args)
+        #         model.protolayer.copy_(new_proto)
+
+    model.load_state_dict(state['state_dict'])
     torch.save(state, args.model_path)
     return model
 
@@ -224,7 +235,7 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
                    args.lambda5 * l1_loss
 
             losses_per_batch.append(float(loss))
-            _, predicted = torch.max(predicted_label.data, 1)
+            _, predicted = torch.max(predicted_label, 1)
             all_preds += predicted.cpu().detach().numpy().tolist()
             all_labels += label_batch.cpu().detach().numpy().tolist()
 
@@ -242,6 +253,10 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
                 proto_texts = pruned_text
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
+
+        if args.language_model == 'Clip':
+            nearest_image(args, model, proto_texts)
+
         proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
         txt_file = open(save_path, 'w+')
@@ -257,19 +272,18 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
             txt_file.write(str(x) + '\n')
         txt_file.close()
 
-        # give prototpye its "true" label after training
+        # give prototype its "true" label after training
         s = 'label'
         proto_labels = torch.tensor([int(p[p.index(s) + len(s)+1]) for p in proto_info])
         proto_labels = torch.stack((1-proto_labels, proto_labels), dim=1)
 
         # plot prototypes
-        prototypes = model.get_protos().cpu().detach().numpy()
-        visualize_protos(args, embedding_train.cpu().detach().numpy(), mask_train, labels_train, prototypes, model, proto_labels)
+        prototypes = model.get_protos().cpu().numpy()
+        visualize_protos(args, embedding_train.cpu().numpy(), mask_train, labels_train, prototypes, model, proto_labels)
 
         if len(embedding_train.shape) == 3 and args.attn:
             neighborhood = bubble(args, train_batches_unshuffled, model, text_train)
             fname += '_WordVis'
-            # proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
             save_path = os.path.join(os.path.dirname(args.model_path), fname)
             txt_file = open(save_path, 'w+')
             for line in neighborhood:
@@ -280,31 +294,37 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 def query(args, train_batches_unshuffled, labels_train, text_train, model):
     print('\nEvaluate query, loading model:', args.model_path)
     model.eval()
+    args.is_image = False
+    if args.is_image:
+        from PIL import Image
+        pth = 'data/test_images/4.jpg'
+        args.query = Image.open(pth)
 
-    embedding_query = model.compute_embedding(args.query, args)
+    embedding_query, mask_query = model.compute_embedding(args.query, args)
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
     proto_info, proto_texts = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
-    proto_texts = [id_+txt for id_, txt in zip(proto_info,proto_texts)]
-    prototype_distances, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'))
+    prototype_distances, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'), mask_query)
     predicted = torch.argmax(predicted_label).cpu().detach()
 
-    query2proto = torch.argmin(prototype_distances)
-    nearest_proto = proto_texts[query2proto]
+    k = 3
+    query2proto = torch.topk(prototype_distances.cpu().detach().squeeze(), k=k, largest=False)
     weights = model.get_proto_weights()
+    weight = - weights[query2proto[1], predicted]
+    similarity = - query2proto[0]
 
     save_path = os.path.join(os.path.dirname(args.model_path), 'query.txt')
+    sentiment_dict = {1: 'positive', 0: 'negative'}
+
     txt_file = open(save_path, 'w+')
-    txt_file.write(''.join(args.query) + '\n')
-    txt_file.write(f'nearest prototype id: {query2proto+1}\n')
-    txt_file.write(f'weights: {weights[query2proto]}\n')
-    txt_file.write(nearest_proto + '\n')
-    txt_file.write(f'predicted: {predicted}\n')
-    for line in weights:
-        txt_file.write(f'{line} \n')
-    for arg in vars(args):
-        txt_file.write(f'{arg}: {vars(args)[arg]}\n')
+    txt_file.write('query: ' + ''.join(args.query) + '\n')
+    txt_file.write(f'predicted: {sentiment_dict[int(predicted)]}\n\n')
+    for i in range(k):
+        nearest_proto = proto_texts[query2proto[1][i]]
+        txt_file.write(f'Explanation_{i+1}: {nearest_proto}\n')
+        txt_file.write(f'similarity: {float(similarity[i]):.3f}\n')
+        txt_file.write(f'weight: {weight[i]:.3f}\n\n')
     txt_file.close()
 
 
@@ -316,9 +336,19 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         args, model = remove_prototypes(args, protos2remove, model, use_cos=False)
 
     if 'add' in args.mode:
-        protos2add = [['bad service', 'good food'],[0,1]]
+        protos2add = [['bad service'],[0]]
         # protos2add = list(map(int,input('Select prototypes to add: ').split()))
         args, model = add_prototypes(args, protos2add, model)
+
+    if 'replace' in args.mode:
+        protos2add = [['bad service'], [0]]
+        args, model = replace_prototypes(args, protos2add, model)
+        protos2add = [['great service'], [1]]
+        args, model = replace_prototypes(args, protos2add, model)
+        protos2add = [['shit location'], [2]]
+        args, model = replace_prototypes(args, protos2add, model)
+        protos2add = [['awesome food'], [3]]
+        args, model = replace_prototypes(args, protos2add, model)
 
     if 'reinitialize' in args.mode:
         protos2reinit = []
@@ -326,7 +356,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         model = reinit_prototypes(args, protos2reinit, model)
 
     if 'finetune' in args.mode:
-        protos2finetune = []
+        protos2finetune = [0]
         # protos2finetune = list(map(int,input('Select prototypes to finetune: ').split()))
         model = finetune_prototypes(args, protos2finetune, model)
 
@@ -339,18 +369,19 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
     # save changed model
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain whole network or only retrain last layer (fc)
+    # args.num_epochs = 100
     model = train(args, train_batches, val_batches, model)
     test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model, pruned_protos)
 
 
 if __name__ == '__main__':
-    torch.manual_seed(0)
-    np.random.seed(0)
+    # torch.manual_seed(0)
+    # np.random.seed(0)
     torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object and start the RTPT tracking
-    rtpt = RTPT(name_initials='FF', experiment_name='TProto', max_iterations=args.num_epochs)
+    rtpt = RTPT(name_initials='FF', experiment_name='TProNet', max_iterations=args.num_epochs)
     rtpt.start()
 
     text, labels = load_data(args)
@@ -364,7 +395,7 @@ if __name__ == '__main__':
     args.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(labels), y=labels)
 
     if args.num_prototypes % args.num_classes:
-        print('number of prototpyes should be divisible by number of classes')
+        print('number of prototypes should be divisible by number of classes')
         args.num_prototypes -= args.num_prototypes % args.num_classes
     # define which prototype belongs to which class (onehot encoded matrix)
     args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes//args.num_classes, 1
@@ -372,7 +403,6 @@ if __name__ == '__main__':
     # protos_per_class = round(balance*args.num_prototypes)
     # args.prototype_class_identity[:protos_per_class, 0] = 1
     # args.prototype_class_identity[protos_per_class:, 1] = 1
-    args.class_specific = True
 
     if args.few_shot:
         idx = random.sample(range(len(text_train)), 100)
@@ -437,6 +467,6 @@ if __name__ == '__main__':
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
     if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
-            or 'prune' in args.mode:
+            or 'prune' in args.mode or 'replace' in args.mode:
         interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches,
                  labels_train, text_train, model)

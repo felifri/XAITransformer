@@ -13,6 +13,7 @@ from nltk.corpus import stopwords
 import string
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import gpumap
+from torchvision.utils import save_image
 
 words = set(nltk.corpus.words.words())
 
@@ -21,13 +22,32 @@ words = set(nltk.corpus.words.words())
 
 def dist2similarity(distance):
     # turn distance into similarity. if distance is very small we have value ~1, if distance is infinite we have 0.
-    # something like cosine. Also scale distance by 0.01 to not get too small values.
-    return torch.exp(-distance * 0.05)
+    # something like cosine. Also scale distance by 0.05 to not get too small values.
+    # return torch.exp(-distance * 0.05)
+    return 10/distance
+
+def ned_torch(x1: torch.Tensor, x2: torch.Tensor, dim=1, eps=1e-8) -> torch.Tensor:
+    # to compute ned for two individual vectors e.g to compute a loss (NOT BATCHES/COLLECTIONS of vectorsc)
+    if len(x1.size()) == 1:
+        # [K] -> [1]
+        ned_2 = 0.5 * ((x1 - x2).var() / (x1.var() + x2.var() + eps))
+    # if the input is a (row) vector e.g. when comparing two batches of acts of D=1 like with scores right before sf
+    elif x1.size() == torch.Size([x1.size(0), 1]):  # note this special case is needed since var over dim=1 is nan (1 value has no variance).
+        # [B, 1] -> [B]
+        ned_2 = 0.5 * ((x1 - x2)**2 / (x1**2 + x2**2 + eps)).squeeze()  # Squeeze important to be consistent with .var, otherwise tensors of different sizes come out without the user expecting it
+    # common case is if input is a batch
+    else:
+        # e.g. [B, D] -> [B]
+        ned_2 = 0.5 * ((x1 - x2).var(dim=dim) / (x1.var(dim=dim) + x2.var(dim=dim) + eps))
+    return ned_2 ** 0.5
+
+def nes_torch(x1, x2, dim=1, eps=1e-8):
+    return 1 - ned_torch(x1, x2, dim, eps)
 
 def adjust_cl_ids(args, ids):
     for i in ids:
         if i == 0:
-            cl = torch.Tensor([1, 0]).view(1,2).to(f'cuda:{args.gpu[0]}')
+            cl = torch.Tensor([1, 0]).view(1, 2).to(f'cuda:{args.gpu[0]}')
         elif i == 1:
             cl = torch.Tensor([0, 1]).view(1, 2).to(f'cuda:{args.gpu[0]}')
         args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
@@ -90,7 +110,7 @@ def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_lab
         embed_trans = pca.transform(embedding)
         proto_trans = pca.transform(prototypes)
     elif args.trans_type == 'TSNE':
-        tsne = TSNE(n_jobs=8,n_components=2).fit_transform(np.vstack((embedding,prototypes)))
+        tsne = TSNE(n_jobs=8, n_components=2, metric=args.metric).fit_transform(np.vstack((embedding,prototypes)))
         [embed_trans, proto_trans] = [tsne[:len(embedding)],tsne[len(embedding):]]
     elif args.trans_type == 'UMAP':
         umapped = gpumap.GPUMAP().fit_transform(np.vstack((embedding,prototypes)))
@@ -99,7 +119,7 @@ def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_lab
     for cl in range(args.num_classes):
         ix = np.where(np.array(rnd_labels) == cl)[0]
         ax.scatter(embed_trans[rnd_samples[ix],0],embed_trans[rnd_samples[ix],1],c=cdict_d[cl],marker='x', label=ldict_d[cl],alpha=0.3)
-        ix = np.where(proto_labels[:,cl].cpu().detach().numpy() == 1)[0]
+        ix = np.where(proto_labels[:,cl].cpu().numpy() == 1)[0]
         if args.proto_size > 1:
             ix = [args.proto_size * i + x for i in ix.tolist() for x in range(args.proto_size)]
         ax.scatter(proto_trans[ix,0],proto_trans[ix,1],c=cdict_p[cl],marker='o',label=ldict_p[cl], s=80)
@@ -153,152 +173,170 @@ def bubble(args, train_batches_unshuffled, model, text_train):
     return proto_texts
 
 def proto_loss(prototype_distances, label, model, args):
-    if args.class_specific:
-        max_dist = torch.prod(torch.tensor(model.protolayer.size())) # proxy variable, could be any high value
+    max_dist = torch.prod(torch.tensor(model.protolayer.size())) # proxy variable, could be any high value
 
-        # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
-        # calculate cluster cost, high cost if same class protos are far distant
-        prototypes_of_correct_class = torch.t(args.prototype_class_identity[:, label])
-        inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=1)
-        clust_loss = torch.mean(max_dist - inverted_distances)
-        # assures that each sample is not too far distant form a prototype of its class
-        inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=0)
-        distr_loss = torch.mean(max_dist - inverted_distances)
+    # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
+    # calculate cluster cost, high cost if same class protos are far distant
+    prototypes_of_correct_class = torch.t(args.prototype_class_identity[:, label])
+    inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=1)
+    clust_loss = torch.mean(max_dist - inverted_distances)
+    # assures that each sample is not too far distant form a prototype of its class
+    inverted_distances, _ = torch.max((max_dist - prototype_distances) * prototypes_of_correct_class, dim=0)
+    distr_loss = torch.mean(max_dist - inverted_distances)
 
-        # calculate separation cost, low (highly negative) cost if other class protos are far distant
-        prototypes_of_wrong_class = 1 - prototypes_of_correct_class
-        inverted_distances_to_nontarget_prototypes, _ = \
-            torch.max((max_dist - prototype_distances) * prototypes_of_wrong_class, dim=1)
-        sep_loss = - torch.mean(max_dist - inverted_distances_to_nontarget_prototypes)
-    else:
-        # Computes the interpretability losses (R1 and R2 from the paper (Li et al. 2018)) for the prototype nets.
-        # r1: compute min distance from each prototype to an example, i.e batch_size * num_prototypes -> num_prototypes.
-        # this assures that each prototype is as close as possible to at least one of the examples
-        distr_loss = torch.mean(torch.min(prototype_distances, dim=0)[0])
-        # r2: compute min distance from each example to prototype, i.e batch_size * num_prototypes -> batch_size.
-        # this assures that each example is as close as possible to one of the prototypes, which is something like a
-        # cluster cost
-        clust_loss = torch.mean(torch.min(prototype_distances, dim=1)[0])
-        sep_loss = 0
+    # calculate separation cost, low (highly negative) cost if other class protos are far distant
+    prototypes_of_wrong_class = 1 - prototypes_of_correct_class
+    inverted_distances_to_nontarget_prototypes, _ = \
+        torch.max((max_dist - prototype_distances) * prototypes_of_wrong_class, dim=1)
+    sep_loss = - torch.mean(max_dist - inverted_distances_to_nontarget_prototypes)
 
     # diversity loss, assures that prototypes are not too close
-    dist_sum = 0
-    comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
-    for k, l in comb:
-        # only increase penalty until distance reaches 19, above constant penalty, since we don't want prototypes to be
-        # too far spread
-        # dist = torch.dist(model.protolayer[k, :, :], model.protolayer[l, :, :], p=2)
-        # limit = torch.tensor(19).to(f'cuda:{args.gpu[0]}')
-        # dist_sum += torch.maximum(limit, dist)
-        dist_sum -= torch.mean(F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :],dim=0))
-    # if distance small i.e. similarity high -> higher penalty
-    divers_loss = - dist_sum / comb.size(0)
+    # put penalty only only on prototypes of same class
+    comb = torch.combinations(torch.arange(0, args.num_prototypes), r=2)
+    # and only softly encourage to be different not opposite, hence max(0, .)
+    # divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:,comb][:,:,0], model.protolayer[:,comb][:,:,1]).clamp(min=0))
+    if args.metric == 'cosine':
+        divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:,comb][:,:,0],
+                                                     model.protolayer[:,comb][:,:,1]).squeeze().clamp(min=0.3))
+    elif args.metric == 'L2':
+        divers_loss = torch.mean(nes_torch(model.protolayer[:,comb][:,:,0],
+                                           model.protolayer[:,comb][:,:,1], dim=2).squeeze().clamp(min=0.3))
 
-    l1_loss = model.fc.weight.data.norm(p=1)
+    # l1 loss on classification layer weights, scaled by number of prototypes
+    l1_loss = model.fc.weight.norm(p=1) / args.num_prototypes
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
 #### interaction methods ######
 
 def finetune_prototypes(args, protos2finetune, model):
-    # # if mode == 'weights':
-    # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
-    # gradient_mask_fc = torch.zeros(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
-    # gradient_mask_fc[:,protos2finetune] = 1
-    # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
-    # if mode == 'prototypes':
-    # also, do not update the selected prototypes which should be kept
-    gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
-    gradient_mask_proto[protos2finetune, :, :] = 1
-    model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
+    with torch.no_grad():
+        # # if mode == 'weights':
+        # # set hook to ignore weights of prototypes to keep when computing gradient, to learn the other weights
+        # gradient_mask_fc = torch.zeros(model.fc.weight.size()).to(f'cuda:{args.gpu[0]}')
+        # gradient_mask_fc[:,protos2finetune] = 1
+        # model.fc.weight.register_hook((lambda grad: grad.mul_(gradient_mask_fc)))
+        # if mode == 'prototypes':
+        # also, do not update the selected prototypes which should be kept
+        gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
+        gradient_mask_proto[protos2finetune, :, :] = 1
+        model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
     return model
 
 def reinit_prototypes(args, protos2reinit, model):
-    # reinitialize selected prototypes
-    model.protolayer.data[protos2reinit,:] = nn.init.uniform_(torch.empty(model.protolayer.size()))[protos2reinit,:]
-    # onyl retrain reinitialized protos and set gradients of other prototypes to zero
-    model = finetune_prototypes(args, protos2reinit, model)
+    with torch.no_grad():
+        # reinitialize selected prototypes
+        model.protolayer[:, protos2reinit] = nn.Parameter(nn.init.uniform_(torch.empty(model.protolayer.size()))[:,
+                                                  protos2reinit].to(f'cuda:{args.gpu[0]}'), requires_grad=True)
+        # onyl retrain reinitialized protos and set gradients of other prototypes to zero
+        model = finetune_prototypes(args, protos2reinit, model)
     return model
 
+def replace_prototypes(args, protos2add, model):
+    with torch.no_grad():
+        # reassign protolayer, add new ones
+        idx = protos2add[1]
+        protos2add, _ = model.compute_embedding(protos2add[0], args)
+        if args.level == 'sentence':
+            protos2add = protos2add.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+        elif args.level == 'word':
+            protos2add = protos2add.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+
+        model.protolayer[:, idx] = protos2add
+        model.protolayer.requires_grad = False
+    return args, model
+
 def add_prototypes(args, protos2add, model):
-    # reassign protolayer, add new ones
-    args = adjust_cl_ids(args, protos2add[1])
-    protos2add = model.compute_embedding(protos2add[0], args)
-    protos2add = protos2add.view(-1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
-    new_protos = torch.cat((model.protolayer.data,protos2add))
-    model.protolayer = nn.Parameter(new_protos,requires_grad=True)
-    # reassign last layer, add new ones
-    weights2keep = model.fc.weight.data.detach().clone()
-    model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
-    new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
-    model.fc.data = torch.cat((weights2keep, new_weights), dim=1)
-    args.num_prototypes = args.num_prototypes + len(protos2add)
-    args, model = update_params(args, model)
+    with torch.no_grad():
+        # reassign protolayer, add new ones
+        args = adjust_cl_ids(args, protos2add[1])
+        protos2add, mask2add = model.compute_embedding(protos2add[0], args)
+        if args.level == 'sentence':
+            protos2add = protos2add.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+        elif args.level == 'word':
+            protos2add = protos2add.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+
+        new_protos = torch.cat((model.protolayer.clone(), protos2add), dim=1)
+        model.protolayer = nn.Parameter(new_protos, requires_grad=False)
+        # reassign last layer, add new ones
+        weights2keep = model.fc.weight.detach().clone()
+        model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
+        new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
+        model.fc.weight.data = torch.cat((weights2keep, new_weights), dim=1)
+        args.num_prototypes = args.num_prototypes + len(protos2add)
+        args, model = update_params(args, model)
     return args, model
 
 def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=False):
-    # prune number of prototypes, the ones that do not have high weight wrt max weight are discarded
-    if use_weight:
-        w_limit = torch.max(abs(model.fc.weight.data)) * 0.3
-        for i in range(args.num_prototypes):
-            if (abs(model.fc.weight.data[0,i]) < w_limit) and (abs(model.fc.weight.data[1,i]) < w_limit):
-                protos2remove.append(i)
-    # if prototypes are too close/ similar throw away
-    if use_cos:
-        comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
-        for k, l in comb:
-            similarity = F.cosine_similarity(model.protolayer[k, :, :], model.protolayer[l, :, :], dim=0)
-            similarity = torch.sum(similarity) / args.proto_size
-            if similarity>0.9:
-                protos2remove.append(int(k))
+    with torch.no_grad():
+        # prune number of prototypes, the ones that do not have high weight wrt max weight are discarded
+        if use_weight:
+            w_limit = torch.max(abs(model.fc.weight)) * 0.3
+            for i in range(args.num_prototypes):
+                if (abs(model.fc.weight[0,i]) < w_limit) and (abs(model.fc.weight[1,i]) < w_limit):
+                    protos2remove.append(i)
+        # if prototypes are too close/ similar throw away
+        if use_cos:
+            comb = torch.combinations(torch.arange(args.num_prototypes), r=2)
+            for k, l in comb:
+                similarity = F.cosine_similarity(model.protolayer[:, k], model.protolayer[:, l], dim=1)
+                similarity = torch.sum(similarity) / args.proto_size
+                if similarity>0.9:
+                    protos2remove.append(int(k))
 
-    # make list items unique
-    protos2remove = list(set(protos2remove))
-    protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
-    args.prototype_class_identity =  args.prototype_class_identity[protos2keep,:]
-    # reassign protolayer, remove unneeded ones and only keep useful ones
-    model.protolayer = nn.Parameter(model.protolayer.data[protos2keep,:,:], requires_grad=True)
-    weights2keep = model.fc.weight.data.detach().clone()[:,protos2keep]
-    model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False)
-    model.fc.weight.data = weights2keep
-    args.num_prototypes = args.num_prototypes - len(protos2remove)
-    args, model = update_params(args, model)
+        # make list items unique
+        protos2remove = list(set(protos2remove))
+        protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
+        args.prototype_class_identity =  args.prototype_class_identity[protos2keep,:]
+        # reassign protolayer, remove unneeded ones and only keep useful ones
+        model.protolayer = nn.Parameter(model.protolayer[:, protos2keep], requires_grad=True)
+        weights2keep = model.fc.weight.detach().clone()[:, protos2keep]
+        model.fc.weight.copy_(weights2keep)
+        args.num_prototypes = args.num_prototypes - len(protos2remove)
+        args, model = update_params(args, model)
     return args, model
 
 def prune_prototypes(args, proto_texts, model):
-    # define stop words, but e.g. 'not' should not be removed
-    stop_words = set(stopwords.words('english')) - {'not', 'no'}
-    pruned_protos = []
+    with torch.no_grad():
+        sim = 0.9
+        # define stop words, but e.g. 'not' should not be removed
+        stop_words = set(stopwords.words('english')) - {'not', 'no'}
+        pruned_protos = []
 
-    # remove stop words, non alpha words, single character words and punctuation
-    for p in proto_texts:
-        p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
-        pruned_protos.append(TreebankWordDetokenizer().detokenize([w for w in p.split() if w.isalpha()
-                                                                   and not w in stop_words and len(w)>1]))
-    new_prototypes = model.compute_embedding(pruned_protos, args)[0].to(f'cuda:{args.gpu[0]}')
-    if len(new_prototypes.size()) < 3: new_prototypes.unsqueeze_(-1)
-    # only assign new prototypes if cosine similarity to old one is close
-    angle =  F.cosine_similarity(model.protolayer, new_prototypes)
-    mask = (angle>0.85).squeeze()
+        # remove stop words, non alpha words, single character words and punctuation
+        for p in proto_texts:
+            p = p.translate(str.maketrans('', '', string.punctuation+'“”—'))
+            pruned_protos.append(TreebankWordDetokenizer().detokenize([w for w in p.split() if w.isalpha()
+                                                                       and not w in stop_words and len(w)>1]))
+        new_prototypes = model.compute_embedding(pruned_protos, args)[0].to(f'cuda:{args.gpu[0]}')
+        if len(new_prototypes.size()) < 3: new_prototypes.unsqueeze_(0)
+        # only assign new prototypes if cosine similarity to old one is close
+        angle =  F.cosine_similarity(model.protolayer, new_prototypes, dim=2)
+        mask = (angle > sim).squeeze()
 
-    # further reduce length if possible
-    for i in range(args.num_prototypes):
-        if len(pruned_protos[i])>4:
-            new_prototxts_ = " ".join(pruned_protos[i].split()[0:4])
-        else:
-            new_prototxts_ = pruned_protos[i]
-        new_prototypes_ = model.compute_embedding(new_prototxts_, args).to(f'cuda:{args.gpu[0]}')
-        angle_ = F.cosine_similarity(model.protolayer[i].T, new_prototypes_)
-        if angle_>0.85:
-            pruned_protos[i] = new_prototxts_
-            new_prototypes[i] = new_prototypes_.T
+        l = 12
+        # further reduce length if possible
+        for i in range(args.num_prototypes):
+            if len(pruned_protos[i]) > l:
+                if mask[i]:
+                    new_prototxt = TreebankWordDetokenizer().detokenize(pruned_protos[i].split()[0:l])
+                else:
+                    new_prototxt = TreebankWordDetokenizer().detokenize(proto_texts[i].split()[0:l])
+            else:
+                new_prototxt = pruned_protos[i]
+            new_prototype, _ = model.compute_embedding(new_prototxt, args)
+            new_prototype = new_prototype.to(f'cuda:{args.gpu[0]}')
+            angle_ = F.cosine_similarity(model.protolayer[:,i], new_prototype.squeeze(0), dim=1)
+            if angle_ > sim:
+                pruned_protos[i] = new_prototxt
+                new_prototypes[0,i,:] = new_prototype
 
-    # mask: replace only words with high cos sim
-    for i,m in enumerate(mask):
-        if m: proto_texts[i] = pruned_protos[i]
-    # assign new prototypes and don't update them when retraining
-    model.protolayer.data[mask] = new_prototypes[mask]
-    model.protolayer.requires_grad = False
+        # mask: replace only words with high cos sim
+        for i,m in enumerate(mask):
+            if m: proto_texts[i] = pruned_protos[i]
+        # assign new prototypes and don't update them when retraining
+        model.protolayer[:, mask] = new_prototypes[:, mask].float()
+        model.protolayer.requires_grad = False
     return model, proto_texts
 
 ####################################################
@@ -545,3 +583,58 @@ def save_embedding(embedding, mask, args, fname, set_name):
     torch.save(embedding, path_e)
     path_m = os.path.join(path, name + '_mask.pt')
     torch.save(mask, path_m)
+
+
+#############################################################
+#############################################################
+#############################################################
+
+
+def load_image_features():
+    image_dir = 'restaurant'
+    path = '/workspace/repositories/datasets'
+    if image_dir == 'imagenet':
+        path_c = os.path.join(path, 'clip', 'imagenet_emb')
+    elif image_dir == 'restaurant':
+        path_c = os.path.join(path, 'clip', 'yelp_restaurant_emb')
+    files_c = [f for f in os.listdir(path_c) if os.path.isfile(os.path.join(path_c, f))]
+    image_features, fname = [], []
+    for file in files_c:
+        with open(os.path.join(path_c, file), 'rb') as f:
+            f, i = pickle.load(f)
+            image_features.append(i)
+            fname.append(f)
+    image_features = np.concatenate(image_features)
+    if image_dir == 'imagenet':
+        fname = [st[22:] for sublist in fname for st in sublist]
+    elif image_dir == 'restaurant':
+        fname = [st[33:] for sublist in fname for st in sublist]
+    return fname, image_features
+
+def path2img(fname):
+    path = '/workspace/repositories/datasets'
+    with open(os.path.join(path, fname), 'rb') as f:
+        im = torch.from_numpy(np.array(plt.imread(f, format='jpeg')))
+        if len(im.shape) < 3:
+            im = im.unsqueeze(2).repeat(1,1,3)
+        image = im.float().permute(2,0,1) / 255
+    return image
+
+def nearest_image(args, model, proto_texts):
+    import sentence_transformers
+    fname, image_features = load_image_features()
+    # query = model.protolayer.detach().clone().squeeze()
+    query, _ = model.compute_embedding(proto_texts, args)
+    query = query.squeeze()
+    topk = 3
+    nearest_img = sentence_transformers.util.semantic_search(query, image_features, top_k=topk)
+    nearest_img = [k['corpus_id'] for topk_img in nearest_img for k in topk_img]
+
+    n = 0
+    for i in range(args.num_prototypes):
+        # proto_images = []
+        for k in range(topk):
+            img = path2img(fname[nearest_img[n]]).float()
+            # proto_images.append(img)
+            save_image(img, os.path.dirname(args.model_path) + f'/proto{i+1}.{k+1}.png')
+            n += 1
