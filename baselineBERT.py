@@ -1,15 +1,12 @@
 import argparse
-import sys
-import random
-
 import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from rtpt import RTPT
-from utils import save_embedding, load_embedding, load_data
-import transformers
+from utils import load_data
 import logging
 from transformers import AdamW, BertForSequenceClassification, BertTokenizer
 from transformers import get_linear_schedule_with_warmup
@@ -26,10 +23,12 @@ parser.add_argument('-bs', '--batch_size', default=256, type=int,
                     help='Select batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
-parser.add_argument('--data_dir', default='./data/rt-polarity',
+parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
                     help='Select data name')
+parser.add_argument('--num_prototypes', default=8, type=int,
+                    help='Total number of prototypes')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
@@ -53,11 +52,9 @@ def _from_pretrained(cls, *args, **kw):
             "Re-trying to convert from TensorFlow checkpoint (from_tf=True)")
         return cls.from_pretrained(*args, from_tf=True, **kw)
 
-
-def train(args, text_train, labels_train, text_test, labels_test):
-    model_name_or_path = 'bert-base-uncased'
-    fname = model_name_or_path
-    model = BertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=2)
+def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
+    model_name_or_path = 'bert-large-uncased'
+    model = BertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
     model.train()
 
     tokenizer = BertTokenizer.from_pretrained(model_name_or_path)
@@ -80,9 +77,12 @@ def train(args, text_train, labels_train, text_test, labels_test):
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to('cuda'))
 
     print("\nStarting training for {} epochs\n".format(num_epochs))
+    best_acc = 0
+    train_batches = torch.utils.data.DataLoader(list(zip(text_train, labels_train)), batch_size=args.batch_size,
+                                                shuffle=True, pin_memory=True)
+    val_batches = torch.utils.data.DataLoader(list(zip(text_val, labels_val)), batch_size=args.batch_size,
+                                              shuffle=False, pin_memory=True)
     for epoch in tqdm(range(num_epochs)):
-        train_batches = torch.utils.data.DataLoader(list(zip(text_train, labels_train)), batch_size=args.batch_size,
-                                                  shuffle=True)#, drop_last=True, num_workers=len(args.gpu))
         # Update the RTPT
         rtpt.step(subtitle=f"epoch={epoch+1}")
 
@@ -120,14 +120,11 @@ def train(args, text_train, labels_train, text_test, labels_test):
 
         if (epoch + 1) % args.val_epoch == 0 or epoch + 1 == num_epochs:
             model.eval()
-
             all_preds = []
             all_labels = []
             losses_per_batch = []
-            test_batches = torch.utils.data.DataLoader(list(zip(text_test, labels_test)), batch_size=args.batch_size,
-                                                       shuffle=False)#, num_workers=len(args.gpu))
             with torch.no_grad():
-                for text_batch, label_batch in test_batches:
+                for text_batch, label_batch in val_batches:
                     encoding = tokenizer(text_batch, return_tensors='pt', padding=True, truncation=True)
                     input_ids = encoding['input_ids']
                     attention_mask = encoding['attention_mask']
@@ -147,40 +144,60 @@ def train(args, text_train, labels_train, text_test, labels_test):
                     losses_per_batch.append(float(loss))
 
                 loss = np.mean(losses_per_batch)
-                acc_test = balanced_accuracy_score(all_labels, all_preds)
-                print(f"test evaluation on best model: loss {loss:.4f}, acc_test {100 * acc_test:.4f}")
+                acc_val = balanced_accuracy_score(all_labels, all_preds)
+                print(f"test evaluation on best model: loss {loss:.4f}, acc_val {100 * acc_val:.3f}")
 
-        save_path = "./trained_BERTclassifier/{}/model.pt".format(args.data_name)
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        torch.save(model.state_dict(), save_path)
+                if acc_val > best_acc:
+                    best_acc = acc_val
+                    best_model = model.state_dict()
+
+    model.load_state_dict(best_model)
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+    losses_per_batch = []
+    test_batches = torch.utils.data.DataLoader(list(zip(text_test, labels_test)), batch_size=args.batch_size,
+                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
+    with torch.no_grad():
+        for emb_batch, label_batch in test_batches:
+            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
+            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
+            predicted_label = model.forward(emb_batch, [])
+            loss = ce_crit(predicted_label, label_batch)
+
+            losses_per_batch.append(float(loss))
+            _, predicted = torch.max(predicted_label.data, 1)
+            all_preds += predicted.cpu().numpy().tolist()
+            all_labels += label_batch.cpu().numpy().tolist()
+
+        loss = np.mean(losses_per_batch)
+        acc_test = balanced_accuracy_score(all_labels, all_preds)
+        print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
+
+    save_path = "./trained_BERTclassifier/{}/model.pt".format(args.data_name)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save(model.state_dict(), save_path)
+
 
 if __name__ == '__main__':
-    torch.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
+    # torch.manual_seed(0)
+    # np.random.seed(0)
+    # random.seed(0)
     args = parser.parse_args()
 
-    # Create RTPT object
-    rtpt = RTPT(name_initials='FelFri', experiment_name='TransfProto', max_iterations=args.num_epochs)
-    # Start the RTPT tracking
+    # Create RTPT object and start the RTPT tracking
+    rtpt = RTPT(name_initials='FF', experiment_name='TProNet', max_iterations=args.num_epochs)
     rtpt.start()
 
     text, labels = load_data(args)
     # split data, and split test set again to get validation and test set
     text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.8, stratify=labels,
                                                                         random_state=42)
-    _, text_test, _, labels_test = train_test_split(text_test, labels_test,
-                                                    test_size=0.1,
-                                                    stratify=labels_test,
-                                                    random_state=42)
+    text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
+                                                                    stratify=labels_test, random_state=12)
 
-    # set class weights for balanced cross entropy computation
-    balance = labels.count(0) / len(labels)
-    args.class_weights = [1-balance, balance]
-    print(args.class_weights)
+    # set class weights for balanced loss computation
+    args.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(labels), y=labels)
 
-    if args.one_shot:
-        idx = random.sample(range(len(text_train)), 100)
-        text_train = list(text_train[i] for i in idx)
-
-    train(args, text_train, labels_train, text_test, labels_test)
+    train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test)
