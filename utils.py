@@ -26,32 +26,19 @@ def dist2similarity(distance):
     # return torch.exp(-distance * 0.05)
     return 10/distance
 
-def ned_torch(x1: torch.Tensor, x2: torch.Tensor, dim=1, eps=1e-8) -> torch.Tensor:
-    # to compute ned for two individual vectors e.g to compute a loss (NOT BATCHES/COLLECTIONS of vectorsc)
-    if len(x1.size()) == 1:
-        # [K] -> [1]
-        ned_2 = 0.5 * ((x1 - x2).var() / (x1.var() + x2.var() + eps))
-    # if the input is a (row) vector e.g. when comparing two batches of acts of D=1 like with scores right before sf
-    elif x1.size() == torch.Size([x1.size(0), 1]):  # note this special case is needed since var over dim=1 is nan (1 value has no variance).
-        # [B, 1] -> [B]
-        ned_2 = 0.5 * ((x1 - x2)**2 / (x1**2 + x2**2 + eps)).squeeze()  # Squeeze important to be consistent with .var, otherwise tensors of different sizes come out without the user expecting it
-    # common case is if input is a batch
-    else:
-        # e.g. [B, D] -> [B]
-        ned_2 = 0.5 * ((x1 - x2).var(dim=dim) / (x1.var(dim=dim) + x2.var(dim=dim) + eps))
+def ned_torch(x1, x2, dim=1, eps=1e-8):
+    ned_2 = 0.5 * ((x1 - x2).var(dim=dim) / (x1.var(dim=dim) + x2.var(dim=dim) + eps))
     return ned_2 ** 0.5
 
 def nes_torch(x1, x2, dim=1, eps=1e-8):
     return 1 - ned_torch(x1, x2, dim, eps)
 
-def adjust_cl_ids(args, ids):
-    for i in ids:
-        if i == 0:
-            cl = torch.Tensor([1, 0]).view(1, 2).to(f'cuda:{args.gpu[0]}')
-        elif i == 1:
-            cl = torch.Tensor([0, 1]).view(1, 2).to(f'cuda:{args.gpu[0]}')
-        args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
-    return args
+def adjust_cl_ids(args, id):
+    if id == 0:
+        cl = torch.Tensor([1, 0]).view(1, 2).to(f'cuda:{args.gpu[0]}')
+    elif id == 1:
+        cl = torch.Tensor([0, 1]).view(1, 2).to(f'cuda:{args.gpu[0]}')
+    return cl
 
 def update_params(args, model):
     model.num_prototypes = args.num_prototypes
@@ -59,6 +46,16 @@ def update_params(args, model):
         model.num_filters = [model.num_prototypes // len(args.dilated)] * len(args.dilated)
         model.num_filters[0] += model.num_prototypes % len(args.dilated)
     return args, model
+
+def extent_data(args, embedding_train, mask_train, text_train, labels_train, embedding, mask, text, label):
+    embedding_train = torch.cat((embedding_train, embedding.cpu().squeeze(0)))
+    mask_train = torch.cat((mask_train, mask.squeeze(0)))
+    text_train.append(text)
+    labels_train.append(label)
+    train_batches_unshuffled = torch.utils.data.DataLoader(list(zip(embedding_train, mask_train, labels_train)),
+                                                           batch_size=args.batch_size, shuffle=False, pin_memory=True,
+                                                           num_workers=0)
+    return embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled
 
 def get_nearest(args, model, train_batches_unshuffled, text_train, labels_train):
     model.eval()
@@ -70,8 +67,8 @@ def get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
             distances, top_w = model.get_dist(batch, mask)
             dist.append(distances)
             w.append(top_w)
-        proto_ids, proto_texts = model.nearest_neighbors(dist, w, text_train, labels_train)
-    return proto_ids, proto_texts
+        proto_ids, proto_texts, [nearest_sent, nearest_words] = model.nearest_neighbors(dist, w, text_train, labels_train)
+    return proto_ids, proto_texts, [nearest_sent, nearest_words]
 
 def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_labels):
     # sample from data set for plot
@@ -207,6 +204,26 @@ def proto_loss(prototype_distances, label, model, args):
 
     return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
+def project(args, embedding_train, model, train_batches_unshuffled, text_train, labels_train):
+    # project prototypes
+    if args.level == 'sentence':
+        proto_ids, _, [nearest_sent, _] = get_nearest(args, model, train_batches_unshuffled, text_train,
+                                              labels_train)
+        new_proto = embedding_train[nearest_sent, :]
+    elif args.level == 'word':
+        proto_ids, _, [nearest_sent, nearest_words] = get_nearest(args, model, train_batches_unshuffled, text_train,
+                                                          labels_train)
+        new_proto = embedding_train[nearest_sent[:, np.newaxis].repeat(args.proto_size, axis=1),
+                    nearest_words, :]
+
+    new_proto = new_proto.view(model.protolayer.shape)
+    model.protolayer.copy_(new_proto)
+    # give prototypes their "true" label
+    s = 'label'
+    proto_labels = torch.tensor([int(p[p.index(s) + len(s) + 1]) for p in proto_ids])
+    args.prototype_class_identity.copy_(torch.stack((1 - proto_labels, proto_labels), dim=1))
+    return model, args
+
 #### interaction methods ######
 
 def finetune_prototypes(args, protos2finetune, model):
@@ -219,7 +236,7 @@ def finetune_prototypes(args, protos2finetune, model):
         # if mode == 'prototypes':
         # also, do not update the selected prototypes which should be kept
         gradient_mask_proto = torch.zeros(model.protolayer.size()).to(f'cuda:{args.gpu[0]}')
-        gradient_mask_proto[protos2finetune, :, :] = 1
+        gradient_mask_proto[:, protos2finetune] = 1
         model.protolayer.register_hook(lambda grad: grad.mul_(gradient_mask_proto))
     return model
 
@@ -227,45 +244,61 @@ def reinit_prototypes(args, protos2reinit, model):
     with torch.no_grad():
         # reinitialize selected prototypes
         model.protolayer[:, protos2reinit] = nn.Parameter(nn.init.uniform_(torch.empty(model.protolayer.size()))[:,
-                                                  protos2reinit].to(f'cuda:{args.gpu[0]}'), requires_grad=True)
+                                                  protos2reinit], requires_grad=True).to(f'cuda:{args.gpu[0]}')
         # onyl retrain reinitialized protos and set gradients of other prototypes to zero
         model = finetune_prototypes(args, protos2reinit, model)
     return model
 
-def replace_prototypes(args, protos2add, model):
+def replace_prototypes(args, protos2replace, model, embedding_train, mask_train, text_train, labels_train):
     with torch.no_grad():
         # reassign protolayer, add new ones
-        idx = protos2add[1]
-        protos2add, _ = model.compute_embedding(protos2add[0], args)
+        idx = protos2replace[1]
+        args.prototype_class_identity[idx, :] = adjust_cl_ids(args, protos2replace[2])
+        max_l = embedding_train.size() if args.level == 'word' else False
+        protos2replace_e, mask_e = model.compute_embedding(protos2replace[0], args, max_l)
         if args.level == 'sentence':
-            protos2add = protos2add.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+            protos2replace_e = protos2replace_e.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
         elif args.level == 'word':
-            protos2add = protos2add.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+            protos2replace_e = protos2replace_e.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
 
-        model.protolayer[:, idx] = protos2add
+        model.protolayer[:, idx] = nn.Parameter(protos2replace_e)
         model.protolayer.requires_grad = False
-    return args, model
+        embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = extent_data(args, embedding_train,
+                                                                                          mask_train, text_train,
+                                                                                          labels_train,
+                                                                                          protos2replace_e, mask_e,
+                                                                                          protos2replace[0],
+                                                                                          protos2replace[2])
+    return args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled
 
-def add_prototypes(args, protos2add, model):
+def add_prototypes(args, protos2add, model, embedding_train, mask_train, text_train, labels_train):
     with torch.no_grad():
         # reassign protolayer, add new ones
-        args = adjust_cl_ids(args, protos2add[1])
-        protos2add, mask2add = model.compute_embedding(protos2add[0], args)
+        cl = adjust_cl_ids(args, protos2add[1])
+        args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
+        max_l = embedding_train.size() if args.level == 'word' else False
+        protos2add_e, mask_e = model.compute_embedding(protos2add[0], args, max_l)
         if args.level == 'sentence':
-            protos2add = protos2add.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+            protos2add_e = protos2add_e.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
         elif args.level == 'word':
-            protos2add = protos2add.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+            protos2add_e = protos2add_e.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
+            protos2add_e = protos2add_e[:, args.proto_size] # cut off if words2add are longer than proto size
 
-        new_protos = torch.cat((model.protolayer.clone(), protos2add), dim=1)
+        new_protos = torch.cat((model.protolayer.clone(), protos2add_e), dim=1)
         model.protolayer = nn.Parameter(new_protos, requires_grad=False)
         # reassign last layer, add new ones
         weights2keep = model.fc.weight.detach().clone()
-        model.fc = nn.Linear((args.num_prototypes+len(protos2add)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
-        new_weights = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add))).to(f'cuda:{args.gpu[0]}')
-        model.fc.weight.data = torch.cat((weights2keep, new_weights), dim=1)
-        args.num_prototypes = args.num_prototypes + len(protos2add)
+        weights_new = nn.init.uniform_(torch.empty(args.num_classes, len(protos2add_e))).to(f'cuda:{args.gpu[0]}')
+        model.fc = nn.Linear((args.num_prototypes + len(protos2add_e)), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
+        model.fc.weight.copy_(torch.cat((weights2keep, weights_new), dim=1))
+        args.num_prototypes = args.num_prototypes + len(protos2add_e)
         args, model = update_params(args, model)
-    return args, model
+        embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = extent_data(args, embedding_train,
+                                                                                          mask_train, text_train,
+                                                                                          labels_train, protos2add_e,
+                                                                                          mask_e, protos2add[0],
+                                                                                          protos2add[1])
+    return args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled
 
 def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=False):
     with torch.no_grad():
@@ -289,8 +322,9 @@ def remove_prototypes(args, protos2remove, model, use_cos=False, use_weight=Fals
         protos2keep = [p for p in list(range(args.num_prototypes)) if p not in protos2remove]
         args.prototype_class_identity =  args.prototype_class_identity[protos2keep,:]
         # reassign protolayer, remove unneeded ones and only keep useful ones
-        model.protolayer = nn.Parameter(model.protolayer[:, protos2keep], requires_grad=True)
+        model.protolayer = nn.Parameter(model.protolayer[:, protos2keep], requires_grad=False).to(f'cuda:{args.gpu[0]}')
         weights2keep = model.fc.weight.detach().clone()[:, protos2keep]
+        model.fc = nn.Linear(len(protos2keep), args.num_classes, bias=False).to(f'cuda:{args.gpu[0]}')
         model.fc.weight.copy_(weights2keep)
         args.num_prototypes = args.num_prototypes - len(protos2remove)
         args, model = update_params(args, model)
