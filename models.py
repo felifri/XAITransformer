@@ -10,7 +10,6 @@ import logging
 from transformers import BertForSequenceClassification
 from utils import dist2similarity, nes_torch
 import clip
-from slot_attention import SlotAttention
 
 
 class ProtoNet(nn.Module):
@@ -50,7 +49,7 @@ class ProtoNet(nn.Module):
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
 
-    def compute_embedding(self, x, args):
+    def compute_embedding(self, x, args, max_l=False):
         if args.language_model == 'SentBert':
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
@@ -78,10 +77,11 @@ class ProtoNet(nn.Module):
     def nearest_neighbors(distances, _, text_train, labels_train):
         distances = torch.cat(distances)
         _, nearest_ids = torch.topk(distances, 1, dim=0, largest=False)
+        nearest_ids = nearest_ids.cpu().detach().numpy().T
         proto_id = [f'P{proto+1} | sentence {index} | label {labels_train[index]} | text: ' for proto, sent
-                    in enumerate(nearest_ids.cpu().detach().numpy().T) for index in sent]
-        proto_texts = [f'{text_train[index]}' for sent in nearest_ids.cpu().detach().numpy().T for index in sent]
-        return proto_id, proto_texts
+                    in enumerate(nearest_ids) for index in sent]
+        proto_texts = [f'{text_train[index]}' for sent in nearest_ids for index in sent]
+        return proto_id, proto_texts, [nearest_ids, []]
 
 
 class BaseNet(ProtoNet):
@@ -129,7 +129,6 @@ class ProtoPNet(nn.Module):
                                        requires_grad=True)
         self.attention = nn.MultiheadAttention(self.enc_size, num_heads=1)
         self.slots = min(9, self.proto_size*2)
-        self.slot_attention = SlotAttention(num_slots = self.slots, dim = self.enc_size)
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -137,7 +136,7 @@ class ProtoPNet(nn.Module):
     def get_protos(self):
         return self.protolayer
 
-    def compute_embedding(self, x, args):
+    def compute_embedding(self, x, args, max_l=False):
         if args.language_model == 'Bert':
             LM = BertModel.from_pretrained('bert-large-uncased').to(f'cuda:{args.gpu[0]}')
         elif args.language_model == 'GPT2':
@@ -154,18 +153,23 @@ class ProtoPNet(nn.Module):
 
         bs = 10 # divide data by a batch size if too big for memory to process embedding at once
         word_embedding = []
-        inputs = self.tokenizer(x, return_tensors='pt', padding=True, add_special_tokens=False)
+        if not max_l:
+            inputs = self.tokenizer(x, return_tensors='pt', padding=True, add_special_tokens=False)
+        elif max_l:
+            inputs = self.tokenizer(x, return_tensors='pt', padding='max_length', max_length=max_l,
+                                    add_special_tokens=False)
         inputs_ = {'input_ids': [], 'attention_mask': []}
         attn_mask = inputs['attention_mask']
         for i in range(0,len(x),bs):
             inputs_['input_ids'] = inputs['input_ids'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             inputs_['attention_mask'] = inputs['attention_mask'][i:i+bs].to(f'cuda:{args.gpu[0]}')
             outputs = LM(inputs_['input_ids'], attention_mask=inputs_['attention_mask'])
-            if args.avoid_spec_token:
+            if args.avoid_pad_token:
                 # set embedding values of PAD token to 0 or a high number to make it "unlikely regarded" in distance computation
-                # outputs[0][inputs_['attention_mask'] == 0] = 0 #10
-                inputs_['attention_mask'][inputs_['attention_mask'] == 0] = 1e1
-                word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
+                outputs[0][inputs_['attention_mask'] == 0] = 0
+                word_embedding.extend(outputs[0].cpu().detach())
+                # inputs_['attention_mask'][inputs_['attention_mask'] == 0] = -1
+                # word_embedding.extend((outputs[0] * inputs_['attention_mask'].unsqueeze(-1)).cpu())
             else:
                 word_embedding.extend(outputs[0].cpu().detach())
         embedding = torch.stack(word_embedding, dim=0)
@@ -186,48 +190,41 @@ class ProtoPNetConv(ProtoPNet):
         # embedding = self.emb_trafo(embedding)
         if self.attn:
             embedding, _ =  self.compute_attention(embedding, mask)
-        distances = self.compute_distance(embedding)
+        distances = self.compute_distance(embedding, mask)
         prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
         class_out = self.fc(prototype_distances)
         return prototype_distances, class_out
 
     def compute_attention(self, embedding, mask):
-        slot = False
-        top_w = []
-        if slot:
-            embedding = self.slot_attention(embedding)
-        else:
-            bs = embedding.shape[0]
-            embedding = embedding.permute(1,0,2)
-            mask = (mask < 1)
-            _, w_attention = self.attention(embedding, embedding, embedding, key_padding_mask=mask)
-            w_attention = w_attention.mean(dim=2)
-            _, top_w = w_attention.topk(k=self.slots)
-            # top_w = F.gumbel_softmax(w_attention)#.topk(k=min(9,self.proto_size*2))
-            top_w, _ = top_w.sort(dim=1) # keep original order
-            embedding = embedding.permute(1,0,2)
-            # reduce each sequence from seq_len to k, pool only top k most attended words
-            embedding = embedding[torch.arange(bs).unsqueeze(-1), top_w, :]
+        bs = embedding.shape[0]
+        embedding = embedding.permute(1,0,2)
+        mask = (mask < 1)
+        _, w_attention = self.attention(embedding, embedding, embedding, key_padding_mask=mask)
+        w_attention = w_attention.mean(dim=1)
+        _, top_w = w_attention.topk(k=self.slots)
+        top_w, _ = top_w.sort(dim=1) # keep original order
+        embedding = embedding.permute(1,0,2)
+        # reduce each sequence from seq_len to k, pool only top k most attended words
+        embedding = embedding[torch.arange(bs).unsqueeze(-1), top_w, :]
         return embedding, top_w
 
-    def compute_distance(self, batch):
+    def compute_distance(self, batch, mask):
         N, S = batch.shape[0:2]  # Batch size, Sequence length
         E = self.enc_size  # Encoding size
         K = self.proto_size  # Patch length
         p = self.protolayer.view(1, self.num_prototypes, 1, K * E)
+        distances = []
         if self.attn:
             c = torch.combinations(torch.arange(S), r=K)
             C = c.shape[0]
             b = batch[:,c,:].view(N, 1, C, K * E)
             if self.metric == 'L2':
-                # distances = torch.norm(b - p, dim=-1, p=2)
-                # distances = - dist2similarity(distances)
-                distances = - nes_torch(b, p, dim=-1)
+                dist = - nes_torch(b, p, dim=-1)
             elif self.metric == 'cosine':
-                distances = - F.cosine_similarity(b, p, dim=-1)
-            distances = [distances]
+                dist = - F.cosine_similarity(b, p, dim=-1)
+            distances.append(dist)
         else:
-            distances, j = [], 0
+            j = 0
             for d, n in zip(self.dilated, self.num_filters):
                 H = S - d * (K - 1)  # Number of patches
                 x = batch.unsqueeze(1)
@@ -237,12 +234,15 @@ class ProtoPNetConv(ProtoPNet):
                 p_ = p[:,j:j+n,:]
                 p_ = p_.view(1, n, 1, K * E)
                 if self.metric == 'L2':
-                    # dist = torch.norm(x - p_, dim=-1, p=2)
-                    # dist = - dist2similarity(dist)
-                    dist = - nes_torch(x, p, dim=-1)
+                    dist = - nes_torch(x, p_, dim=-1)
                 elif self.metric == 'cosine':
-                    # negative since loss minimizes and we want to maximize the similarity
                     dist = - F.cosine_similarity(x, p_, dim=-1)
+                # cut off combinations that contain padding, still keep for every example at least one combination, even
+                # if it contains padding
+                overlap = d * (K - 1)
+                m = mask[:,overlap:].unsqueeze(1)
+                m[:,:,0] = 1
+                dist = dist * m
                 distances.append(dist)
                 j += n
 
@@ -252,7 +252,7 @@ class ProtoPNetConv(ProtoPNet):
         top_w = []
         if self.attn:
             embedding, top_w =  self.compute_attention(embedding, mask)
-        distances = self.compute_distance(embedding)
+        distances = self.compute_distance(embedding, mask)
         return distances, top_w
 
     def nearest_neighbors(self, distances, top_w, text_train, labels_train):
@@ -294,7 +294,7 @@ class ProtoPNetConv(ProtoPNet):
             proto_ids.append(f'P{i+1} | sentence {s_index} | label {labels_train[s_index]} | text: {text_train[s_index]}| proto: ')
             proto_texts.append(f'{token2text}')
 
-        return proto_ids, proto_texts
+        return proto_ids, proto_texts, [nearest_sent, nearest_words]
 
 
 def _from_pretrained(cls, *args, **kw):
