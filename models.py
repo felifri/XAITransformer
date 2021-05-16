@@ -8,7 +8,7 @@ from transformers import TransfoXLTokenizer, TransfoXLModel, RobertaTokenizer, R
 import transformers
 import logging
 from transformers import BertForSequenceClassification
-from utils import dist2similarity, nes_torch
+from utils import nes_torch
 import clip
 
 
@@ -118,13 +118,11 @@ class ProtoPNet(nn.Module):
             self.enc_size = 1024
         elif args.language_model == 'DistilBert':
             self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-            self.enc_size = 1024
+            self.enc_size = 768
         self.proto_size = args.proto_size
         self.num_prototypes = args.num_prototypes
         self.metric = args.metric
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
-        self.emb_trafo = nn.Sequential(nn.Linear(in_features=self.enc_size, out_features=self.enc_size),
-                                       nn.ReLU())
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty(args.num_prototypes, self.enc_size, self.proto_size)),
                                        requires_grad=True)
         self.attention = nn.MultiheadAttention(self.enc_size, num_heads=1)
@@ -187,7 +185,6 @@ class ProtoPNetConv(ProtoPNet):
                                        requires_grad=True)
 
     def forward(self, embedding, mask):
-        # embedding = self.emb_trafo(embedding)
         if self.attn:
             embedding, _ =  self.compute_attention(embedding, mask)
         distances = self.compute_distance(embedding, mask)
