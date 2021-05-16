@@ -12,11 +12,12 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from rtpt import RTPT
 from transformers import get_linear_schedule_with_warmup
+from PIL import Image
 
 from models import ProtoPNetConv, ProtoNet
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, bubble, nearest_image, \
-    replace_prototypes, project
+    replace_prototypes, soft_rplc_prototypes, project
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
@@ -69,7 +70,7 @@ parser.add_argument('--avoid_pad_token', type=bool, default=False,
                     help='Whether to manually alter PAD token after Bert embedding computation')
 parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
-parser.add_argument('--query', type=str, default='I do not like the food here', nargs='+',
+parser.add_argument('--query', type=str, default=['I do not like the food here'], nargs='+',
                     help='Type your query to test the model and get classification explanation')
 parser.add_argument('--metric', type=str, default='cosine', choices=['cosine','L2'],
                     help='What metric should be used to compute the distance/ similarity?')
@@ -77,12 +78,18 @@ parser.add_argument('--attn', type=str, default=False,
                     help='Whether to use self-attention on the word embeddings before distance computation')
 parser.add_argument('--project', type=str, default=False,
                     help='Whether to project the prototypes on their nearest neighbor after x epochs')
+parser.add_argument('--soft', type=str, default=False, nargs='+',
+                    help='Whether to softly apply loss')
 
 def train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train):
     num_epochs = args.num_epochs
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
-    # scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
+    scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
+
+    # Create RTPT object and start the RTPT tracking
+    rtpt = RTPT(name_initials='FF', experiment_name='TProNet', max_iterations=args.num_epochs)
+    rtpt.start()
 
     print(f'\nStart training for {num_epochs} epochs\n')
     best_acc = 0
@@ -137,7 +144,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             divers_loss_per_batch.append(float(args.lambda4 * divers_loss))
             l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
 
-        # scheduler.step()
+        scheduler.step()
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         distr_mean_loss = np.mean(distr_loss_per_batch)
@@ -187,7 +194,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
                     state = {'state_dict': model.state_dict(), 'hyper_params': args, 'acc_val': acc_val}
 
         # project prototypes
-        if (epoch + 1) % 5 == 0  and args.project and (num_epochs * 2 // 10) < (epoch+1) < (num_epochs * 8 // 10):
+        if (epoch + 1) % 5 == 0  and args.project and (num_epochs * 2 // 10) < (epoch + 1) < (num_epochs * 8 // 10):
             with torch.no_grad():
                 model, args = project(args, embedding_train, model, train_batches_unshuffled, text_train, labels_train)
         # final projection, train only classification layer
@@ -204,8 +211,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
     return model
 
 
-def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model,
-         pruned_text=None):
+def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model):
     print('\nStart evaluation, loading model:', args.model_path)
     model.eval()
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
@@ -247,8 +253,6 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 
         if os.path.basename(args.model_path).startswith('interacted'):
             fname = 'interacted_' + str(args.num_prototypes) + 'prototypes.txt'
-            if 'prune' in args.mode:
-                proto_texts = pruned_text
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
 
@@ -294,16 +298,18 @@ def query(args, train_batches_unshuffled, labels_train, text_train, model):
     model.eval()
     args.is_image = False
     if args.is_image:
-        from PIL import Image
         pth = 'data/test_images/4.jpg'
         args.query = Image.open(pth)
 
     embedding_query, mask_query = model.compute_embedding(args.query, args)
+    embedding_query = embedding_query.to(f'cuda:{args.gpu[0]}')
+    mask_query = mask_query.to(f'cuda:{args.gpu[0]}')
+    args.query = args.query[0]
     torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
 
     # "convert" prototype embedding to text (take text of nearest training sample)
-    proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
-    prototype_distances, predicted_label = model.forward(embedding_query.to(f'cuda:{args.gpu[0]}'), mask_query)
+    _, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    prototype_distances, predicted_label = model.forward(embedding_query, mask_query)
     predicted = torch.argmax(predicted_label).cpu().detach()
 
     k = 3
@@ -321,8 +327,8 @@ def query(args, train_batches_unshuffled, labels_train, text_train, model):
     for i in range(k):
         nearest_proto = proto_texts[query2proto[1][i]]
         txt_file.write(f'Explanation_{i+1}: {nearest_proto}\n')
-        txt_file.write(f'similarity: {float(similarity[i]):.3f}\n')
-        txt_file.write(f'weight: {weight[i]:.3f}\n\n')
+        txt_file.write(f'score: {float(similarity[i]):.3f} * {weight[i]:.3f} = {float(similarity[i]*weight[i]):.3f}\n')
+    txt_file.write(f'\nwith:\nsimilarity * weight = score')
     txt_file.close()
 
 
@@ -339,33 +345,39 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             add_prototypes(args, protos2add, model, embedding_train, mask_train, text_train, labels_train)
 
+    if 'soft' in args.mode:
+        # sequence, position, class_id, certainty, embedding
+        args.soft = ['They offer a bad service.', 8, 0, 1]
+        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
+            soft_rplc_prototypes(args, args.soft, model, embedding_train, mask_train, text_train, labels_train)
+
     if 'replace' in args.mode:
         # sequence, position, class_id
-        protos2replace = ['They offer a bad service.', 4, 0]
+        protos2replace = ['They offer a bad service.', 8, 0]
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             replace_prototypes(args, protos2replace, model, embedding_train, mask_train, text_train, labels_train)
 
     if 'reinitialize' in args.mode:
-        protos2reinit = []
+        protos2reinit = [8]
         model = reinit_prototypes(args, protos2reinit, model)
 
     if 'finetune' in args.mode:
-        protos2finetune = [0]
+        protos2finetune = [8]
         model = finetune_prototypes(args, protos2finetune, model)
 
-    pruned_protos = []
     if 'prune' in args.mode:
         _, protos2prune, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
-        model, pruned_protos = prune_prototypes(args, protos2prune, model)
+        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
+            prune_prototypes(args, protos2prune, model, embedding_train, mask_train, text_train, labels_train)
 
     # save changed model
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
-    # retrain whole network or only retrain last layer (fc)
-    # args.num_epochs = 100
+    # retrain only retrain last layer (fc)
+    args.num_epochs = 100
+    args.project = False
     model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                   labels_train)
-    test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model,
-         pruned_protos)
+    test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
 
 
 if __name__ == '__main__':
@@ -373,10 +385,6 @@ if __name__ == '__main__':
     # np.random.seed(0)
     torch.set_num_threads(6)
     args = parser.parse_args()
-
-    # Create RTPT object and start the RTPT tracking
-    rtpt = RTPT(name_initials='FF', experiment_name='TProNet', max_iterations=args.num_epochs)
-    rtpt.start()
 
     text, labels = load_data(args)
     # split data, and split test set again to get validation and test set
@@ -395,11 +403,6 @@ if __name__ == '__main__':
     args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes//args.num_classes, 1
                                                                        ).to(f'cuda:{args.gpu[0]}')
 
-    if args.few_shot:
-        idx = random.sample(range(len(text_train)), 100)
-        text_train = list(text_train[i] for i in idx)
-        args.compute_emb = True
-
     model = []
     if args.level == 'word':
         model = ProtoPNetConv(args)
@@ -410,11 +413,16 @@ if __name__ == '__main__':
     # model = torch.nn.DataParallel(model, device_ids=args.gpu)
     model.to(f'cuda:{args.gpu[0]}')
 
+    fname = args.language_model
     avoid = ''
     if args.avoid_pad_token:
         avoid = '_avoid'
 
-    fname = args.language_model
+    if args.few_shot:
+        idx = random.sample(range(len(text_train)), 100)
+        text_train = list(text_train[i] for i in idx)
+        args.compute_emb = True
+
     if not args.compute_emb:
         embedding_train, mask_train = load_embedding(args, fname, 'train' + avoid)
         embedding_val, mask_val = load_embedding(args, fname, 'val' + avoid)
@@ -460,6 +468,6 @@ if __name__ == '__main__':
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
     if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
-            or 'prune' in args.mode or 'replace' in args.mode:
+            or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode:
         interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches,
                  labels_train, text_train, model)
