@@ -48,12 +48,8 @@ parser.add_argument('--metric', type=str, default='L2',
                     help='metric')
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
-    model = []
     fname = args.language_model
-    if fname == 'Bert':
-        model = BasePartsNet(args)
-    elif fname == 'SentBert':
-        model = BaseNet(args)
+    model = BaseNet(args)
 
     print("Running on gpu {}".format(args.gpu))
     model.to(f'cuda:{args.gpu[0]}')

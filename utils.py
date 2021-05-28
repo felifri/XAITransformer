@@ -262,15 +262,15 @@ def replace_prototypes(args, protos2replace, model, embedding_train, mask_train,
         # reassign protolayer, add new ones
         idx = protos2replace[1]
         args.prototype_class_identity[idx, :] = adjust_cl_ids(args, protos2replace[2])
-        max_l = embedding_train.size() if args.level == 'word' else False
-        protos2replace_e, mask_e = model.compute_embedding(protos2replace[0], args, max_l)
+        max_l = args.proto_size if args.level == 'word' else False
+        protos2replace_e, mask_e = model.compute_embedding([protos2replace[0]], args, max_l)
         if args.level == 'sentence':
             protos2replace_e = protos2replace_e.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+            mask_e = mask_e.view(1, -1, model.enc_size)
         elif args.level == 'word':
             protos2replace_e = protos2replace_e.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
 
-        model.protolayer[:, idx] = nn.Parameter(protos2replace_e)
-        model.protolayer.requires_grad = False
+        model.protolayer[:, idx] = nn.Parameter(protos2replace_e, requires_grad=True)
         weights = model.fc.weight.detach().clone()
         weights[:,idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
         model.fc.weight.copy_(weights)
@@ -312,7 +312,7 @@ def add_prototypes(args, protos2add, model, embedding_train, mask_train, text_tr
         # reassign protolayer, add new ones
         cl = adjust_cl_ids(args, protos2add[1])
         args.prototype_class_identity = torch.cat((args.prototype_class_identity, cl))
-        max_l = embedding_train.size() if args.level == 'word' else False
+        max_l = args.proto_size if args.level == 'word' else False
         protos2add_e, mask_e = model.compute_embedding(protos2add[0], args, max_l)
         if args.level == 'sentence':
             protos2add_e = protos2add_e.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')

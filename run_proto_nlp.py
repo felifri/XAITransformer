@@ -418,11 +418,6 @@ if __name__ == '__main__':
     if args.avoid_pad_token:
         avoid = '_avoid'
 
-    if args.few_shot:
-        idx = random.sample(range(len(text_train)), 100)
-        text_train = list(text_train[i] for i in idx)
-        args.compute_emb = True
-
     if not args.compute_emb:
         embedding_train, mask_train = load_embedding(args, fname, 'train' + avoid)
         embedding_val, mask_val = load_embedding(args, fname, 'val' + avoid)
@@ -435,6 +430,13 @@ if __name__ == '__main__':
         save_embedding(embedding_val, mask_val, args, fname, 'val' + avoid)
         save_embedding(embedding_test, mask_test, args, fname, 'test' + avoid)
         torch.cuda.empty_cache()  # free up language model from GPU
+
+    if args.few_shot:
+        idx = random.sample(range(len(text_train)), 100)
+        text_train = list(text_train[i] for i in idx)
+        labels_train = list(labels_train[i] for i in idx)
+        embedding_train = embedding_train[idx,:]
+        mask_train = mask_train[idx,:]
 
     train_batches = torch.utils.data.DataLoader(list(zip(embedding_train, mask_train, labels_train)),
                                                 batch_size=args.batch_size, shuffle=True, pin_memory=True,
