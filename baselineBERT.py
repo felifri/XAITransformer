@@ -8,38 +8,40 @@ from tqdm import tqdm
 from rtpt import RTPT
 from utils import load_data
 import logging
-from transformers import AdamW, BertForSequenceClassification, BertTokenizer
+from transformers import AdamW, BertTokenizer, GPT2Tokenizer, DistilBertTokenizer
 from transformers import get_linear_schedule_with_warmup
-from models import BertForSequenceClassification2Layers
+from models import BertForSequenceClassification2Layers, GPT2ForSequenceClassification2Layers, DistilBertForSequenceClassification2Layers
 import os
 
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
-parser.add_argument('--lr', type=float, default=0.001,
+parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
                     help='How many epochs?')
-parser.add_argument('-bs', '--batch_size', default=256, type=int,
+parser.add_argument('-bs', '--batch_size', default=1024, type=int,
                     help='Select batch size')
 parser.add_argument('--val_epoch', default=10, type=int,
                     help='After how many epochs should the model be evaluated on the validation data?')
 parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
-parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'toxicity_full'],
-                    help='Select data name')
-parser.add_argument('--num_prototypes', default=8, type=int,
+parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity',
+                                                                             'toxicity_full', 'ethics', 'restaurant'],
+                    help='Select name of data set')
+parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('--class_weights', default=[0.5,0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=0, nargs='+',
+parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
-
+parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2','TXL','Roberta',
+                    'DistilBert','Clip'], help='Define which language model to use')
 
 
 def _from_pretrained(cls, *args, **kw):
@@ -53,12 +55,22 @@ def _from_pretrained(cls, *args, **kw):
         return cls.from_pretrained(*args, from_tf=True, **kw)
 
 def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
-    model_name_or_path = 'bert-large-uncased'
-    model = BertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
+
+    if args.language_model == 'Bert':
+        model_name_or_path = 'bert-large-uncased'
+        model = BertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
+        tokenizer = BertTokenizer.from_pretrained(model_name_or_path)
+    elif args.language_model == 'GPT2':
+        model_name_or_path = 'gpt2-xl'
+        model = GPT2ForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
+        tokenizer = GPT2Tokenizer.from_pretrained(model_name_or_path)
+        tokenizer.pad_token = '[PAD]'
+    elif args.language_model == 'DistilBert':
+        model_name_or_path = 'distilbert-base-uncased'
+        model = DistilBertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
+        tokenizer = DistilBertTokenizer.from_pretrained(model_name_or_path)
+
     model.train()
-
-    tokenizer = BertTokenizer.from_pretrained(model_name_or_path)
-
     model.to('cuda')
     for param in model.base_model.parameters():
         param.requires_grad = False
@@ -160,22 +172,30 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
     test_batches = torch.utils.data.DataLoader(list(zip(text_test, labels_test)), batch_size=args.batch_size,
                                                shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
     with torch.no_grad():
-        for emb_batch, label_batch in test_batches:
-            emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
-            label_batch = label_batch.to(f'cuda:{args.gpu[0]}')
-            predicted_label = model.forward(emb_batch, [])
-            loss = ce_crit(predicted_label, label_batch)
+        for text_batch, label_batch in test_batches:
+            encoding = tokenizer(text_batch, return_tensors='pt', padding=True, truncation=True)
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
 
-            losses_per_batch.append(float(loss))
-            _, predicted = torch.max(predicted_label.data, 1)
+            input_ids = input_ids.to('cuda')
+            attention_mask = attention_mask.to('cuda')
+            label_batch = label_batch.to('cuda')
+
+            outputs = model(input_ids, attention_mask=attention_mask, return_dict=True)
+            loss = ce_crit(outputs.logits, label_batch)
+
+            _, predicted = torch.max(outputs.logits.data, 1)
             all_preds += predicted.cpu().numpy().tolist()
             all_labels += label_batch.cpu().numpy().tolist()
+
+            # store losses
+            losses_per_batch.append(float(loss))
 
         loss = np.mean(losses_per_batch)
         acc_test = balanced_accuracy_score(all_labels, all_preds)
         print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
-    save_path = "./trained_BERTclassifier/{}/model.pt".format(args.data_name)
+    save_path = f"./trained_{args.language_model}_BaseClassifier/{args.data_name}/model.pt"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(model.state_dict(), save_path)
 
@@ -183,21 +203,16 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
 if __name__ == '__main__':
     # torch.manual_seed(0)
     # np.random.seed(0)
-    # random.seed(0)
+    torch.set_num_threads(6)
     args = parser.parse_args()
 
     # Create RTPT object and start the RTPT tracking
-    rtpt = RTPT(name_initials='FF', experiment_name='TProNet', max_iterations=args.num_epochs)
+    rtpt = RTPT(name_initials='FF', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
     rtpt.start()
 
-    text, labels = load_data(args)
-    # split data, and split test set again to get validation and test set
-    text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.8, stratify=labels,
-                                                                        random_state=42)
-    text_val, text_test, labels_val, labels_test = train_test_split(text_test, labels_test, test_size=0.5,
-                                                                    stratify=labels_test, random_state=12)
+    text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
 
     # set class weights for balanced loss computation
-    args.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(labels), y=labels)
+    args.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(labels_train), y=labels_train)
 
     train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test)

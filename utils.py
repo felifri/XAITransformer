@@ -270,9 +270,9 @@ def replace_prototypes(args, protos2replace, model, embedding_train, mask_train,
         elif args.level == 'word':
             protos2replace_e = protos2replace_e.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
 
-        model.protolayer[:, idx] = nn.Parameter(protos2replace_e, requires_grad=True)
+        model.protolayer[:, idx] = nn.Parameter(protos2replace_e, requires_grad=False)
         weights = model.fc.weight.detach().clone()
-        weights[:,idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
+        weights[:, idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
         model.fc.weight.copy_(weights)
         embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = extent_data(args, embedding_train,
                                                                                           mask_train, text_train,
@@ -500,12 +500,6 @@ def preprocessor_toxic(text, labels, discrete, discard, remove_long):
     if discrete:
         labels = [0 if l < 0.5 else 1 for l in labels]
 
-    # remove non english words (some reviews in Chinese, etc.), but keep digits and punctuation
-    # for i,t in enumerate(text):
-    #     text[i] = convert_language(t)
-    #     if not text[i]:
-    #         del text[i], labels[i]
-
     assert len(text) == len(labels)
     max_len = 200_000
     if len(text)> max_len:
@@ -525,6 +519,18 @@ def get_toxicity(args):
 ###### load ethics data ############################
 ####################################################
 
+
+def get_jigsaw(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    text = pickle.load(open(set_dir + '/text' + f + '.pkl', 'rb'))
+    labels = pickle.load(open(set_dir + '/labels' + f + '.pkl', 'rb'))
+    return text, labels
+
+
+####################################################
+###### load ethics data ############################
+####################################################
+
 def preprocess_ethics(args):
     set_dir = os.path.join(args.data_dir, args.data_name, 'commonsense')
     set_names = ['/cm_train.csv', '/cm_test.csv']#, '/cm_test_hard.csv'
@@ -538,9 +544,13 @@ def preprocess_ethics(args):
 
 def get_ethics(args):
     set_dir = os.path.join(args.data_dir, args.data_name, 'commonsense')
-    text = pickle.load(open(set_dir + '/text.pkl', 'rb'))
-    labels = pickle.load(open(set_dir + '/labels.pkl', 'rb'))
-    return text, labels
+    text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
+    labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
+    text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
+    labels_val = pickle.load(open(set_dir + '/labels_val.pkl', 'rb'))
+    text_test = pickle.load(open(set_dir + '/text_test.pkl', 'rb'))
+    labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 ####################################################
 ###### load movie review data ######################
@@ -548,19 +558,19 @@ def get_ethics(args):
 
 def get_reviews(args):
     set_list = ['train', 'dev', 'test']
-    text, label = [], []
+    text, labels = [], []
     # join train, dev, test; shuffle and split later
     for set_name in set_list:
         set_dir = os.path.join(args.data_dir, args.data_name, set_name)
         text_tmp = pickle.load(open(os.path.join(set_dir, 'word_sequences') + '.pkl', 'rb'))
         # join tokenized sentences back to full sentences for sentenceBert
         text_tmp = [detok.detokenize(sub_list) for sub_list in text_tmp]
-        text.extend(text_tmp)
+        text.append(text_tmp)
         label_tmp = pickle.load(open(os.path.join(set_dir, 'labels') + '.pkl', 'rb'))
         # convert 'pos' & 'neg' to 1 & 0
         label_tmp = convert_label(label_tmp)
-        label.extend(label_tmp)
-    return text, label
+        labels.append(label_tmp)
+    return text[0], text[1], text[2], labels[0], labels[1], labels[2]
 
 def convert_label(labels):
     converted_labels = []
@@ -619,24 +629,41 @@ def convert_language(seq):
 
 def get_restaurant(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
-    text = pickle.load(open(set_dir + '/text.pkl', 'rb'))
-    labels = pickle.load(open(set_dir + '/labels.pkl', 'rb'))
-    return text, labels
+    text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
+    labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
+    text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
+    labels_val = pickle.load(open(set_dir + '/labels_val.pkl', 'rb'))
+    text_test = pickle.load(open(set_dir + '/text_test.pkl', 'rb'))
+    labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 ####################################################
 ###### main loading function #######################
 ####################################################
 
+def get_data(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
+    labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
+    text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
+    labels_val = pickle.load(open(set_dir + '/labels_val.pkl', 'rb'))
+    text_test = pickle.load(open(set_dir + '/text_test.pkl', 'rb'))
+    labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
+
+
 def load_data(args):
     if args.data_name == 'toxicity' or args.data_name == 'toxicity_full':
-        texts, labels = get_toxicity(args)
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_toxicity(args)
     elif args.data_name == 'rt-polarity':
-        texts, labels = get_reviews(args)
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_reviews(args)
     elif args.data_name == 'ethics':
-        texts, labels = get_ethics(args)
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_ethics(args)
     elif args.data_name == 'restaurant':
-        texts, labels = get_restaurant(args)
-    return texts, labels
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_data(args)
+    elif args.data_name == 'jigsaw':
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_data(args)
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 
 ###### load/ store embedding to not compute it every single run again ######
