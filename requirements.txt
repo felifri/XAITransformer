@@ -10,3 +10,5 @@ cmake
 rtpt == 0.0.4
 tqdm == 4.31.1
 nltk == 3.5
+numpy~=1.21.2
+argparse~=1.4.0

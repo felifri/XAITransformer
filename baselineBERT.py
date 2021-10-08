@@ -3,16 +3,14 @@ import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-from rtpt import RTPT
 from utils import load_data
 import logging
 from transformers import AdamW, BertTokenizer, GPT2Tokenizer, DistilBertTokenizer
 from transformers import get_linear_schedule_with_warmup
-from models import BertForSequenceClassification2Layers, GPT2ForSequenceClassification2Layers, DistilBertForSequenceClassification2Layers
+from models import BertForSequenceClassification2Layers, GPT2ForSequenceClassification2Layers, \
+    DistilBertForSequenceClassification2Layers
 import os
-
 
 parser = argparse.ArgumentParser(description='Crazy Stuff')
 parser.add_argument('--lr', type=float, default=0.004,
@@ -32,16 +30,17 @@ parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
-parser.add_argument('--class_weights', default=[0.5,0.5],
+parser.add_argument('--class_weights', default=[0.5, 0.5],
                     help='Class weight for cross entropy loss')
-parser.add_argument('-g','--gpu', type=int, default=[0], nargs='+',
+parser.add_argument('-g', '--gpu', type=int, default=[0], nargs='+',
                     help='GPU device number(s)')
 parser.add_argument('--one_shot', type=bool, default=False,
                     help='Whether to use one-shot learning or not (i.e. only a few training examples)')
 parser.add_argument('--discard', type=bool, default=False,
-                    help='Whether edge cases in the middle between completely toxic(1) and not toxic(0) shall be omitted')
-parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert','SentBert','GPT2','TXL','Roberta',
-                    'DistilBert','Clip'], help='Define which language model to use')
+                    help='Whether edge cases (~0.5) in the middle between toxic(1) and not toxic(0) shall be omitted')
+parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'TXL', 'Roberta',
+                                                                           'DistilBert', 'Clip'],
+                    help='Define which language model to use')
 
 
 def _from_pretrained(cls, *args, **kw):
@@ -54,8 +53,8 @@ def _from_pretrained(cls, *args, **kw):
             "Re-trying to convert from TensorFlow checkpoint (from_tf=True)")
         return cls.from_pretrained(*args, from_tf=True, **kw)
 
-def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
 
+def train(args, text_train, labels_train, text_val, labels_val, text_test, labels_test):
     if args.language_model == 'Bert':
         model_name_or_path = 'bert-large-uncased'
         model = BertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
@@ -67,14 +66,14 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         tokenizer.pad_token = '[PAD]'
     elif args.language_model == 'DistilBert':
         model_name_or_path = 'distilbert-base-uncased'
-        model = DistilBertForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
+        model = DistilBertForSequenceClassification2Layers.from_pretrained(model_name_or_path,
+                                                                           num_labels=args.num_classes)
         tokenizer = DistilBertTokenizer.from_pretrained(model_name_or_path)
 
     model.train()
     model.to('cuda')
     for param in model.base_model.parameters():
         param.requires_grad = False
-
 
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
@@ -95,9 +94,6 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
     val_batches = torch.utils.data.DataLoader(list(zip(text_val, labels_val)), batch_size=args.batch_size,
                                               shuffle=False, pin_memory=True)
     for epoch in tqdm(range(num_epochs)):
-        # Update the RTPT
-        rtpt.step(subtitle=f"epoch={epoch+1}")
-
         losses_per_batch = []
         all_preds = []
         all_labels = []
@@ -170,7 +166,7 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
     all_labels = []
     losses_per_batch = []
     test_batches = torch.utils.data.DataLoader(list(zip(text_test, labels_test)), batch_size=args.batch_size,
-                                               shuffle=False, pin_memory=True, num_workers=0)#, drop_last=True)
+                                               shuffle=False, pin_memory=True, num_workers=0)  # , drop_last=True)
     with torch.no_grad():
         for text_batch, label_batch in test_batches:
             encoding = tokenizer(text_batch, return_tensors='pt', padding=True, truncation=True)
@@ -203,12 +199,8 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
 if __name__ == '__main__':
     # torch.manual_seed(0)
     # np.random.seed(0)
-    torch.set_num_threads(6)
+    # torch.set_num_threads(6)
     args = parser.parse_args()
-
-    # Create RTPT object and start the RTPT tracking
-    rtpt = RTPT(name_initials='FF', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
-    rtpt.start()
 
     text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
 

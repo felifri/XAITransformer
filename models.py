@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model, DistilBertTokenizer, DistilBertModel
-from transformers import BertForSequenceClassification, GPT2ForSequenceClassification, DistilBertForSequenceClassification, \
+from transformers import BertForSequenceClassification, GPT2ForSequenceClassification, \
+    DistilBertForSequenceClassification, \
     RobertaTokenizer, RobertaModel
 import transformers
 import logging
@@ -12,9 +13,9 @@ from utils import nes_torch
 import clip
 
 
-class ProtoNet(nn.Module):
+class ProtoTrexS(nn.Module):
     def __init__(self, args):
-        super(ProtoNet, self).__init__()
+        super(ProtoTrexS, self).__init__()
         self.num_prototypes = args.num_prototypes
         if args.language_model == 'SentBert':
             self.enc_size = 1024
@@ -33,7 +34,6 @@ class ProtoNet(nn.Module):
     def compute_distance(self, embedding):
         if self.metric == 'L2':
             # prototype_distances = torch.cdist(embedding.float(), self.protolayer.squeeze(), p=2)
-            # prototype_distances = - dist2similarity(prototype_distances)
             prototype_distances = - nes_torch(embedding.unsqueeze(1), self.protolayer, dim=-1)
         elif self.metric == 'cosine':
             prototype_distances = - F.cosine_similarity(embedding.unsqueeze(1), self.protolayer, dim=-1)
@@ -49,13 +49,14 @@ class ProtoNet(nn.Module):
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
 
-    def compute_embedding(self, x, args, max_l=False):
+    @staticmethod
+    def compute_embedding(x, args, max_l=False):
         if args.language_model == 'SentBert':
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
             LM, preprocess = clip.load('ViT-B/32', f'cuda:{args.gpu[0]}')
-            # x = preprocess(x).unsqueeze(0)
+            # x = preprocess(x).unsqueeze(0)  # in case of image as input
             x = clip.tokenize(x)
             batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
             embedding = []
@@ -84,7 +85,7 @@ class ProtoNet(nn.Module):
         return proto_id, proto_texts, [nearest_ids, []]
 
 
-class BaseNet(ProtoNet):
+class BaseNet(ProtoTrexS):
     def __init__(self, args):
         super(BaseNet, self).__init__(args)
         self.fc = nn.Sequential(
@@ -98,9 +99,9 @@ class BaseNet(ProtoNet):
         return self.fc(embedding)
 
 
-class ProtoPNet(nn.Module):
+class ProtoTrexW(nn.Module):
     def __init__(self, args):
-        super(ProtoPNet, self).__init__()
+        super(ProtoTrexW, self).__init__()
         if args.language_model == 'Bert':
             self.tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
             self.enc_size = 1024
@@ -119,10 +120,22 @@ class ProtoPNet(nn.Module):
         self.metric = args.metric
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
         self.protolayer = nn.Parameter(
-            nn.init.uniform_(torch.empty(args.num_prototypes, self.enc_size, self.proto_size)),
+            nn.init.uniform_(torch.empty((1, self.num_prototypes, self.enc_size, self.proto_size))),
             requires_grad=True)
         self.attention = nn.MultiheadAttention(self.enc_size, num_heads=1)
         self.slots = min(9, self.proto_size * 2)
+        self.dilated = args.dilated
+        self.attn = args.attn
+        self.num_filters = [self.num_prototypes // len(self.dilated)] * len(self.dilated)
+        self.num_filters[0] += self.num_prototypes % len(self.dilated)
+
+    def forward(self, embedding, mask):
+        if self.attn:
+            embedding, _ = self.compute_attention(embedding, mask)
+        distances = self.compute_distance(embedding, mask)
+        prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
+        class_out = self.fc(prototype_distances)
+        return prototype_distances, class_out
 
     def get_proto_weights(self):
         return self.fc.weight.T.cpu().detach().numpy()
@@ -159,26 +172,6 @@ class ProtoPNet(nn.Module):
             word_embedding.extend(outputs[0].cpu().detach())
         embedding = torch.stack(word_embedding, dim=0)
         return embedding, attn_mask
-
-
-class ProtoPNetConv(ProtoPNet):
-    def __init__(self, args):
-        super(ProtoPNetConv, self).__init__(args)
-        self.dilated = args.dilated
-        self.attn = args.attn
-        self.num_filters = [self.num_prototypes // len(self.dilated)] * len(self.dilated)
-        self.num_filters[0] += self.num_prototypes % len(self.dilated)
-        self.protolayer = nn.Parameter(
-            nn.init.uniform_(torch.empty((1, self.num_prototypes, self.enc_size, self.proto_size))),
-            requires_grad=True)
-
-    def forward(self, embedding, mask):
-        if self.attn:
-            embedding, _ = self.compute_attention(embedding, mask)
-        distances = self.compute_distance(embedding, mask)
-        prototype_distances = torch.cat([torch.min(dist, dim=2)[0] for dist in distances], dim=1)
-        class_out = self.fc(prototype_distances)
-        return prototype_distances, class_out
 
     def compute_attention(self, embedding, mask):
         bs = embedding.shape[0]
@@ -234,9 +227,10 @@ class ProtoPNetConv(ProtoPNet):
         return distances
 
     def get_dist(self, embedding, mask):
-        top_w = []
         if self.attn:
             embedding, top_w = self.compute_attention(embedding, mask)
+        else:
+            top_w = []
         distances = self.compute_distance(embedding, mask)
         return distances, top_w
 
@@ -268,8 +262,8 @@ class ProtoPNetConv(ProtoPNet):
         else:
             j = 0
             for d, n in zip(self.dilated, self.num_filters):
-                # only finds the beginning word id since we did a convolution. so we have to add the subsequent words, also
-                # add padding required by convolution
+                # only finds the beginning word id since we did a convolution. so we have to add the subsequent words,
+                # also add padding required by convolution
                 nearest_words.extend(
                     [[word_id + x * d for x in range(self.proto_size)] for word_id in nearest_patch[j:j + n]])
                 text_nearest.extend(text_tknzd[nearest_sent[j:j + n]])
@@ -307,6 +301,7 @@ class BertForSequenceClassification2Layers(BertForSequenceClassification):
 
         self.init_weights()
 
+
 class GPT2ForSequenceClassification2Layers(GPT2ForSequenceClassification):
     def __init__(self, config):
         super().__init__(config)
@@ -319,6 +314,7 @@ class GPT2ForSequenceClassification2Layers(GPT2ForSequenceClassification):
 
         self.init_weights()
 
+
 class DistilBertForSequenceClassification2Layers(DistilBertForSequenceClassification):
     def __init__(self, config):
         super().__init__(config)
@@ -330,6 +326,7 @@ class DistilBertForSequenceClassification2Layers(DistilBertForSequenceClassifica
         )
 
         self.init_weights()
+
 
 class BaseNetBERT(nn.Module):
     def __init__(self):
