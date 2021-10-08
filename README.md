@@ -13,11 +13,11 @@ The core file is [run_proto_nlp.py](run_proto_nlp.py)
 
 To run this model on sentence-/ word-level, e.g. do:
 ```
-python run_proto_nlp.py --data_name rt-polarity --level sentence --language_model SentBert
-python run_proto_nlp.py --data_name rt-polarity --level word --language_model GPT2 --proto_size 4 
+python run_proto_nlp.py --data_name rt-polarity --level sentence --language_model SentBert --compute_emb True
+python run_proto_nlp.py --data_name rt-polarity --level word --language_model GPT2 --proto_size 4  --compute_emb True
 ```
 
-You can find the results in `experiments/train_results/`
+You can find the results in `experiments/train_results/`. Further parameter choices are explained in the core file.
 
 ## Interaction
 
