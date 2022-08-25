@@ -3,9 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model, DistilBertTokenizer, DistilBertModel
-from transformers import BertForSequenceClassification, GPT2ForSequenceClassification, \
-    DistilBertForSequenceClassification, \
+from transformers import BertTokenizer, BertModel, GPT2Tokenizer, GPT2Model, DistilBertTokenizer, DistilBertModel, \
+    GPTJModel, BertForSequenceClassification, GPT2ForSequenceClassification, DistilBertForSequenceClassification, \
     RobertaTokenizer, RobertaModel
 import transformers
 import logging
@@ -19,6 +18,7 @@ class ProtoTrexS(nn.Module):
         self.num_prototypes = args.num_prototypes
         if args.language_model == 'SentBert':
             self.enc_size = 1024
+            # self.enc_size = 768
         elif args.language_model == 'Clip':
             self.enc_size = 512
         self.metric = args.metric
@@ -26,7 +26,7 @@ class ProtoTrexS(nn.Module):
                                        requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
-    def forward(self, embedding, _):
+    def forward(self, embedding):  # , _):
         prototype_distances = self.compute_distance(embedding)
         class_out = self.fc(prototype_distances)
         return prototype_distances, class_out
@@ -55,7 +55,7 @@ class ProtoTrexS(nn.Module):
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
-            LM, preprocess = clip.load('ViT-B/32', f'cuda:{args.gpu[0]}')
+            LM, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu[0]}')
             # x = preprocess(x).unsqueeze(0)  # in case of image as input
             x = clip.tokenize(x)
             batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
@@ -94,8 +94,9 @@ class BaseNet(ProtoTrexS):
             nn.Linear(args.num_prototypes, args.num_classes, bias=False),
         )
         del self.protolayer
+        self.LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
 
-    def forward(self, embedding, _):
+    def forward(self, embedding):  # , _):
         return self.fc(embedding)
 
 
@@ -109,6 +110,10 @@ class ProtoTrexW(nn.Module):
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2-xl')
             self.tokenizer.pad_token = '[PAD]'
             self.enc_size = 1600
+        elif args.language_model == 'GPTJ':
+            self.tokenizer = GPT2Tokenizer.from_pretrained('EleutherAI/gpt-j-6B')
+            self.tokenizer.pad_token = '[PAD]'
+            self.enc_size = 4096
         elif args.language_model == 'Roberta':
             self.tokenizer = RobertaTokenizer.from_pretrained('roberta-large-mnli')
             self.enc_size = 1024
@@ -148,6 +153,8 @@ class ProtoTrexW(nn.Module):
             LM = BertModel.from_pretrained('bert-large-uncased').to(f'cuda:{args.gpu[0]}')
         elif args.language_model == 'GPT2':
             LM = GPT2Model.from_pretrained('gpt2-xl').to(f'cuda:{args.gpu[0]}')
+        elif args.language_model == 'GPTJ':
+            LM = GPTJModel.from_pretrained('EleutherAI/gpt-j-6B').to(f'cuda:{args.gpu[0]}')
         elif args.language_model == 'Roberta':
             LM = RobertaModel.from_pretrained('roberta-large-mnli').to(f'cuda:{args.gpu[0]}')
         elif args.language_model == 'DistilBert':
@@ -345,3 +352,37 @@ class BaseNetBERT(nn.Module):
             transformers.AutoModelForSequenceClassification,
             self.model_name_or_path,
             config=model_config)
+
+
+class ProtoClip(ProtoTrexS):
+    def __init__(self, args):
+        super(ProtoClip, self).__init__()
+
+    @staticmethod
+    def compute_embedding(x, args, max_l=False):
+        LM, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu[0]}')
+        x = preprocess(x).unsqueeze(0)
+        batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
+        embedding = []
+        for batch in batches:
+            batch = batch.to(f'cuda:{args.gpu[0]}')
+            output = LM.encode_image(batch)
+            embedding.append(output.cpu().detach().float())
+        embedding = torch.cat(embedding, dim=0)
+
+        for param in LM.parameters():
+            param.requires_grad = False
+        if len(embedding.size()) == 1:
+            embedding = embedding.unsqueeze(0).unsqueeze(0)
+        mask = torch.ones(embedding.shape)  # required for attention models
+        return embedding, mask
+
+    @staticmethod
+    def nearest_neighbors(distances, _, text_train, labels_train):
+        distances = torch.cat(distances)
+        _, nearest_ids = torch.topk(distances, 1, dim=0, largest=False)
+        nearest_ids = nearest_ids.cpu().detach().numpy().T
+        proto_id = [f'P{proto + 1} | sentence {index} | label {labels_train[index]} | text: ' for proto, sent
+                    in enumerate(nearest_ids) for index in sent]
+        proto_texts = [f'{text_train[index]}' for sent in nearest_ids for index in sent]
+        return proto_id, proto_texts, [nearest_ids, []]

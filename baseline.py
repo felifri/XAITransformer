@@ -38,7 +38,7 @@ parser.add_argument('--discard', type=bool, default=False,
                     help='Whether edge cases (~0.5) in the middle between toxic(1) and not toxic(0) shall be omitted')
 parser.add_argument('--proto_size', type=int, default=1,
                     help='Define how many words should be used to define a prototype')
-parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2'],
+parser.add_argument('--language_model', type=str, default='SentBert', choices=['Clip', 'SentBert'],
                     help='Define which language model to use')
 parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
@@ -155,6 +155,9 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         acc_test = balanced_accuracy_score(all_labels, all_preds)
         print(f"test evaluation on best model: loss {loss:.3f}, acc_test {100 * acc_test:.3f}")
 
+    save_path = f"./trained_{args.language_model}_BaseClassifier/{args.data_name}/model.pt"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save(model.fc.state_dict(), save_path)
     return model
 
 

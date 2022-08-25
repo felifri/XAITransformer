@@ -3,13 +3,14 @@ import datetime
 import glob
 import os
 import random
+from rtpt import RTPT
 
 import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
-from transformers import get_linear_schedule_with_warmup
+# from transformers import get_linear_schedule_with_warmup
 from PIL import Image
 
 from models import ProtoTrexS, ProtoTrexW
@@ -61,8 +62,8 @@ parser.add_argument('--proto_size', type=int, default=1,
                     help='Define how many words should be used to define a word-level prototype')
 parser.add_argument('--level', type=str, default='word', choices=['word', 'sentence'],
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
-parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'TXL', 'Roberta',
-                                                                           'DistilBert', 'Clip'],
+parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'GPTJ', 'TXL',
+                                                                           'Roberta', 'DistilBert', 'Clip'],
                     help='Define which language model to use')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
@@ -86,7 +87,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
     num_epochs = args.num_epochs
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce_crit = torch.nn.CrossEntropyLoss(weight=torch.tensor(args.class_weights).float().to(f'cuda:{args.gpu[0]}'))
-    scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
+    # scheduler = get_linear_schedule_with_warmup(optimizer, min(10, num_epochs // 20), num_epochs)
 
     print(f'\nStart training for {num_epochs} epochs\n')
     best_acc = 0
@@ -101,6 +102,9 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
         sep_loss_per_batch = []
         divers_loss_per_batch = []
         l1_loss_per_batch = []
+
+        # Update the RTPT
+        rtpt.step()
 
         for emb_batch, mask_batch, label_batch in train_batches:
             emb_batch = emb_batch.to(f'cuda:{args.gpu[0]}')
@@ -138,7 +142,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             divers_loss_per_batch.append(float(args.lambda4 * divers_loss))
             l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
 
-        scheduler.step()
+        # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
         ce_mean_loss = np.mean(ce_loss_per_batch)
         distr_mean_loss = np.mean(distr_loss_per_batch)
@@ -320,7 +324,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
              labels_train, text_train, model):
     print('\nInteract, loading model:', args.model_path)
     if 'remove' in args.mode:
-        protos2remove = [0]
+        protos2remove = [1,9]
         args, model = remove_prototypes(args, protos2remove, model, use_cos=False)
 
     if 'add' in args.mode:
@@ -463,8 +467,11 @@ def faithful(args, embedding_test, mask_test, text_test, labels_test, model, k=1
 if __name__ == '__main__':
     # torch.manual_seed(0)
     # np.random.seed(0)
-    # torch.set_num_threads(6)
+    torch.set_num_threads(6)
     args = parser.parse_args()
+
+    rtpt = RTPT(name_initials='FF', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
+    rtpt.start()
 
     text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
 
@@ -534,6 +541,7 @@ if __name__ == '__main__':
         model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
         model_paths.sort()
         args.model_path = model_paths[-1]
+        args.model_path = './experiments/train_results/10-21 08:16_10_GPTJ_10_False_cosine_/best_model.pth.tar'
         checkpoint = torch.load(args.model_path)
         model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:

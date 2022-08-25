@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.decomposition import PCA
-from MulticoreTSNE import MulticoreTSNE as TSNE
+#from MulticoreTSNE import MulticoreTSNE as TSNE
+from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -11,8 +12,11 @@ import pickle
 import nltk
 import string
 from nltk.tokenize.treebank import TreebankWordTokenizer, TreebankWordDetokenizer
-import gpumap
+# import gpumap
 from torchvision.utils import save_image
+import clip
+from PIL import Image
+from tqdm import tqdm
 
 words = set(nltk.corpus.words.words())
 tok = TreebankWordTokenizer()
@@ -113,9 +117,9 @@ def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_lab
     elif args.trans_type == 'TSNE':
         tsne = TSNE(n_jobs=8, n_components=2, metric=args.metric).fit_transform(np.vstack((embedding, prototypes)))
         [embed_trans, proto_trans] = [tsne[:len(embedding)], tsne[len(embedding):]]
-    elif args.trans_type == 'UMAP':
-        umapped = gpumap.GPUMAP().fit_transform(np.vstack((embedding, prototypes)))
-        [embed_trans, proto_trans] = [umapped[:len(embedding)], umapped[len(embedding):]]
+    # elif args.trans_type == 'UMAP':
+    #     umapped = gpumap.GPUMAP().fit_transform(np.vstack((embedding, prototypes)))
+    #     [embed_trans, proto_trans] = [umapped[:len(embedding)], umapped[len(embedding):]]
 
     for cl in range(args.num_classes):
         ix = np.where(np.array(rnd_labels) == cl)[0]
@@ -474,7 +478,6 @@ def preprocessor_toxic(text, labels, discrete, discard, remove_long):
         txt = []
         lbl = []
         # assures that not too long sequences are used especially required for Clip model
-        import clip
         for t, l in zip(text, labels):
             try:
                 clip.tokenize(t)
@@ -697,25 +700,46 @@ def save_embedding(embedding, mask, args, fname, set_name):
 #############################################################
 
 
-def load_image_features():
-    image_dir = 'imagenet'
+def compute_image_features(image_dir='SMID_images_400px/img'):
+    # image_dir = 'YelpOpenReviews/photos/photos'
+    model, preprocess = clip.load('ViT-B/16', f'cuda:0')
+    for param in model.parameters():
+        param.requires_grad = False
+    path = '/workspace/repositories/datasets/' + image_dir
+    files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    image_features, fname = [], []
+    for file in tqdm(files):
+        with open(os.path.join(path, file), 'rb') as f:
+            image = preprocess(Image.open(f)).unsqueeze(0).to(f'cuda:0')
+            with torch.no_grad():
+                image_features.append(model.encode_image(image).cpu())
+            fname.append(os.path.join(image_dir, file))
+    image_features = torch.cat(image_features)
+
+    pickle.dump([fname, image_features], open(os.path.dirname(path) + '/image_features.pkl', 'wb'))
+    return fname, image_features
+
+
+def load_image_features(image_dir='imagenet'):
+    image_dir = 'YelpOpenReviews/clip'
+    # image_dir = 'SMID_images_400px/clip'
     path = '/workspace/repositories/datasets'
     if image_dir == 'imagenet':
-        path_c = os.path.join(path, 'clip', 'imagenet_emb')
-    elif image_dir == 'restaurant':
-        path_c = os.path.join(path, 'clip', 'yelp_restaurant_emb')
-    files_c = [f for f in os.listdir(path_c) if os.path.isfile(os.path.join(path_c, f))]
+        path_ = os.path.join(path, 'clip', 'imagenet_emb')
+    else:
+        path_ = os.path.join(path, image_dir)
+    files = [f for f in os.listdir(path_) if os.path.isfile(os.path.join(path_, f))]
     image_features, fname = [], []
-    for file in files_c:
-        with open(os.path.join(path_c, file), 'rb') as f:
+    for file in files:
+        with open(os.path.join(path_, file), 'rb') as f:
             f, i = pickle.load(f)
             image_features.append(i)
             fname.append(f)
     image_features = np.concatenate(image_features)
     if image_dir == 'imagenet':
         fname = [st[22:] for sublist in fname for st in sublist]
-    elif image_dir == 'restaurant':
-        fname = [st[33:] for sublist in fname for st in sublist]
+    else:
+        fname = [st for sublist in fname for st in sublist]
     return fname, image_features
 
 
@@ -736,7 +760,7 @@ def nearest_image(args, model, proto_texts):
     query, _ = model.compute_embedding(proto_texts, args)
     query = query.squeeze()
     topk = 3
-    nearest_img = sentence_transformers.util.semantic_search(query, image_features, top_k=topk)
+    nearest_img = sentence_transformers.util.semantic_search(query, torch.tensor(image_features).float(), top_k=topk)
     nearest_img = [k['corpus_id'] for topk_img in nearest_img for k in topk_img]
 
     n = 0
@@ -747,3 +771,20 @@ def nearest_image(args, model, proto_texts):
             # proto_images.append(img)
             save_image(img, os.path.dirname(args.model_path) + f'/proto{i + 1}.{k + 1}.png')
             n += 1
+
+
+def load_images(args, image_dir='SMID_images_400px/img'):
+    image_dir = 'YelpOpenReviews/photos/photos'
+    _, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu}')
+    path = '/workspace/repositories/datasets/' + image_dir
+    files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    images, fname = [], []
+    __import__("pdb").set_trace()
+
+    for file in tqdm(files):
+        with open(os.path.join(path, file), 'rb') as f:
+            images.append(preprocess(Image.open(f)).unsqueeze(0))
+            fname.append(os.path.join(image_dir, file))
+    images = torch.cat(images)
+    pickle.dump([fname, images], open(os.path.dirname(path) + '/images.pkl', 'wb'))
+    return fname, images

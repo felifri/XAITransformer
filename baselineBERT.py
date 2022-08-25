@@ -61,15 +61,15 @@ def train(args, text_train, labels_train, text_val, labels_val, text_test, label
         tokenizer = BertTokenizer.from_pretrained(model_name_or_path)
     elif args.language_model == 'GPT2':
         model_name_or_path = 'gpt2-xl'
-        model = GPT2ForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes)
         tokenizer = GPT2Tokenizer.from_pretrained(model_name_or_path)
         tokenizer.pad_token = '[PAD]'
+        model = GPT2ForSequenceClassification2Layers.from_pretrained(model_name_or_path, num_labels=args.num_classes, pad_token_id=tokenizer.eos_token_id)
     elif args.language_model == 'DistilBert':
         model_name_or_path = 'distilbert-base-uncased'
         model = DistilBertForSequenceClassification2Layers.from_pretrained(model_name_or_path,
                                                                            num_labels=args.num_classes)
         tokenizer = DistilBertTokenizer.from_pretrained(model_name_or_path)
-
+    
     model.train()
     model.to('cuda')
     for param in model.base_model.parameters():
