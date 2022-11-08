@@ -26,7 +26,7 @@ class ProtoTrexS(nn.Module):
                                        requires_grad=True)
         self.fc = nn.Linear(args.num_prototypes, args.num_classes, bias=False)
 
-    def forward(self, embedding):  # , _):
+    def forward(self, embedding, _):
         prototype_distances = self.compute_distance(embedding)
         class_out = self.fc(prototype_distances)
         return prototype_distances, class_out

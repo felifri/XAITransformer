@@ -470,7 +470,7 @@ if __name__ == '__main__':
     torch.set_num_threads(6)
     args = parser.parse_args()
 
-    rtpt = RTPT(name_initials='FF', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
+    rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
     rtpt.start()
 
     text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
@@ -541,7 +541,7 @@ if __name__ == '__main__':
         model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
         model_paths.sort()
         args.model_path = model_paths[-1]
-        args.model_path = './experiments/train_results/10-21 08:16_10_GPTJ_10_False_cosine_/best_model.pth.tar'
+        args.model_path = './experiments/train_results/10-19 06:01_10_GPT2_4_False_cosine_/best_model.pth.tar'
         checkpoint = torch.load(args.model_path)
         model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:
