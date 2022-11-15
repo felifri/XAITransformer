@@ -20,8 +20,10 @@ class ProtoTrexS(nn.Module):
             self.enc_size = 1024
             # self.enc_size = 768
         elif args.language_model == 'Sentence-T5':
-            self.enc_size = 1024
+            self.enc_size = 768
         elif args.language_model == 'all-mpnet':
+            self.enc_size = 768
+        elif args.language_model == 'SGPT':
             self.enc_size = 768
         elif args.language_model == 'Clip':
             self.enc_size = 512
@@ -63,6 +65,9 @@ class ProtoTrexS(nn.Module):
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'all-mpnet':
             LM = SentenceTransformer('all-mpnet-base-v2', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'SGPT':
+            LM = SentenceTransformer('Muennighoff/SGPT-125M-weightedmean-nli-bitfit', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
             LM, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu[0]}')

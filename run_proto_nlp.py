@@ -63,7 +63,7 @@ parser.add_argument('--proto_size', type=int, default=1,
 parser.add_argument('--level', type=str, default='word', choices=['word', 'sentence'],
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'GPTJ', 'TXL',
-                                                                           'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', "all-mpnet"],
+                                                                           'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', 'all-mpnet', 'SGPT'],
                     help='Define which language model to use')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
