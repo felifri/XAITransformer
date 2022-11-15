@@ -19,6 +19,12 @@ class ProtoTrexS(nn.Module):
         if args.language_model == 'SentBert':
             self.enc_size = 1024
             # self.enc_size = 768
+        elif args.language_model == 'Sentence-T5':
+            self.enc_size = 768
+        elif args.language_model == 'all-mpnet':
+            self.enc_size = 768
+        elif args.language_model == 'SGPT':
+            self.enc_size = 768
         elif args.language_model == 'Clip':
             self.enc_size = 512
         self.metric = args.metric
@@ -53,6 +59,15 @@ class ProtoTrexS(nn.Module):
     def compute_embedding(x, args, max_l=False):
         if args.language_model == 'SentBert':
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'Sentence-T5':
+            LM = SentenceTransformer('sentence-t5-base', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'all-mpnet':
+            LM = SentenceTransformer('all-mpnet-base-v2', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'SGPT':
+            LM = SentenceTransformer('Muennighoff/SGPT-125M-weightedmean-nli-bitfit', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
             LM, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu[0]}')
