@@ -537,11 +537,9 @@ if __name__ == '__main__':
         model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                       labels_train)
     if not os.path.exists(args.model_path):
-        load_path = './experiments/train_results/*'
-        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_*/best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
-        args.model_path = './experiments/train_results/10-19 06:01_10_GPT2_4_False_cosine_/best_model.pth.tar'
         checkpoint = torch.load(args.model_path)
         model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:
