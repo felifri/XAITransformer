@@ -23,8 +23,12 @@ class ProtoTrexS(nn.Module):
             self.enc_size = 768
         elif args.language_model == 'all-mpnet':
             self.enc_size = 768
-        elif args.language_model == 'SGPT':
+        elif args.language_model == 'SGPT-125':
             self.enc_size = 768
+        elif args.language_model == 'SGPT-5.8':
+            self.enc_size = 4096
+        elif args.language_model == 'SGPT-7.1':
+            self.enc_size = 4096
         elif args.language_model == 'Clip':
             self.enc_size = 512
         self.metric = args.metric
@@ -61,12 +65,18 @@ class ProtoTrexS(nn.Module):
             LM = SentenceTransformer('bert-large-nli-mean-tokens', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Sentence-T5':
-            LM = SentenceTransformer('sentence-t5-base', device=args.gpu[0])
+            LM = SentenceTransformer('sentence-t5-xxl', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'all-mpnet':
             LM = SentenceTransformer('all-mpnet-base-v2', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
-        elif args.language_model == 'SGPT':
+        elif args.language_model == 'SGPT-7.1':
+            LM = SentenceTransformer('bigscience/sgpt-bloom-7b1-msmarco', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'SGPT-5.8':
+            LM = SentenceTransformer('Muennighoff/SGPT-5.8B-weightedmean-nli-bitfit', device=args.gpu[0])
+            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        elif args.language_model == 'SGPT-125':
             LM = SentenceTransformer('Muennighoff/SGPT-125M-weightedmean-nli-bitfit', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':

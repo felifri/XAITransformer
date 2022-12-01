@@ -16,7 +16,7 @@ from PIL import Image
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
-    replace_prototypes, soft_rplc_prototypes, project
+    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
@@ -63,7 +63,7 @@ parser.add_argument('--proto_size', type=int, default=1,
 parser.add_argument('--level', type=str, default='word', choices=['word', 'sentence'],
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'GPTJ', 'TXL',
-                                                                           'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', 'all-mpnet', 'SGPT'],
+                                                                           'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', 'all-mpnet', 'SGPT-5.8', 'SGPT-125', 'SGPT-7.1'],
                     help='Define which language model to use')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
@@ -473,6 +473,10 @@ if __name__ == '__main__':
     rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
     rtpt.start()
 
+    #if args.data_name == 'restaurant':
+    #    preprocess_restaurant(args)
+    #if args.data_name == 'jigsaw':
+    #    preprocess_jigsaw(args)
     text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
 
     # set class weights for balanced loss computation
@@ -537,6 +541,7 @@ if __name__ == '__main__':
         model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                       labels_train)
     if not os.path.exists(args.model_path):
+        #load latest model path with given amount of prototypes if it exists
         model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_*/best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]

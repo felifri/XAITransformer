@@ -17,6 +17,7 @@ from torchvision.utils import save_image
 import clip
 from PIL import Image
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 words = set(nltk.corpus.words.words())
 tok = TreebankWordTokenizer()
@@ -514,15 +515,37 @@ def get_toxicity(args):
 
 
 ####################################################
-###### load ethics data ############################
+###### load jigsaw data ############################
 ####################################################
-
+def preprocess_jigsaw(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    set_names = ['/train.csv', '/test.csv']
+    df_train = pd.read_csv(set_dir + set_names[0])
+    df_test = pd.read_csv(set_dir + set_names[1])
+    text_train = df_train["comment_text"].tolist()
+    labels_train = df_train["toxic"].tolist()
+    text_test = df_test["comment_text"].tolist()
+    labels_test = df_test["toxic"].tolist()
+    #split train set into train val 20:80
+    text_train, text_val, labels_train, labels_val = train_test_split(text_train, labels_train, test_size=0.8, random_state=42)
+    pickle.dump(text_train, open(set_dir + '/text_train.pkl', 'wb'))
+    pickle.dump(labels_train, open(set_dir + '/labels_train.pkl', 'wb'))
+    pickle.dump(text_test, open(set_dir + '/text_test.pkl', 'wb'))
+    pickle.dump(labels_test, open(set_dir + '/labels_test.pkl', 'wb'))
+    pickle.dump(text_val, open(set_dir + '/text_val.pkl', 'wb'))
+    pickle.dump(labels_val, open(set_dir + '/labels_val.pkl', 'wb'))
 
 def get_jigsaw(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
-    text = pickle.load(open(set_dir + '/text.pkl', 'rb'))
-    labels = pickle.load(open(set_dir + '/labels.pkl', 'rb'))
-    return text, labels
+    if not os.path.exists(set_dir + '/text_train.pkl'):
+        preprocess_restaurant(args)
+    text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
+    labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
+    text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
+    labels_val = pickle.load(open(set_dir + '/labels_val.pkl', 'rb'))
+    text_test = pickle.load(open(set_dir + '/text_test.pkl', 'rb'))
+    labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 
 ####################################################
@@ -621,8 +644,16 @@ def preprocess_restaurant(args, binary=True, file_dir=None, remove_long=True):
     if len(text) > max_len:
         text = [text[i] for i in range(max_len)]
         labels = [labels[i] for i in range(max_len)]
-    pickle.dump(text, open(set_dir + '/text.pkl', 'wb'))
-    pickle.dump(labels, open(set_dir + '/labels.pkl', 'wb'))
+    #split dataset into train and test 70:30
+    text_train, text_test, labels_train, labels_test = train_test_split(text, labels, test_size=0.3, random_state=42)
+    #then split test val 50:50 for 70:15:15
+    text_test, text_val, labels_test, labels_val = train_test_split(text_test, labels_test, test_size=0.5, random_state=42)
+    pickle.dump(text_train, open(set_dir + '/text_train.pkl', 'wb'))
+    pickle.dump(labels_train, open(set_dir + '/labels_train.pkl', 'wb'))
+    pickle.dump(text_test, open(set_dir + '/text_test.pkl', 'wb'))
+    pickle.dump(labels_test, open(set_dir + '/labels_test.pkl', 'wb'))
+    pickle.dump(text_val, open(set_dir + '/text_val.pkl', 'wb'))
+    pickle.dump(labels_val, open(set_dir + '/labels_val.pkl', 'wb'))
     return text, labels
 
 
@@ -633,6 +664,8 @@ def convert_language(seq):
 
 def get_restaurant(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
+    if not os.path.exists(set_dir + '/text_train.pkl'):
+        preprocess_restaurant(args)
     text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
     labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
     text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
@@ -665,9 +698,9 @@ def load_data(args):
     elif args.data_name == 'ethics':
         text_train, text_val, text_test, labels_train, labels_val, labels_test = get_ethics(args)
     elif args.data_name == 'restaurant':
-        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_data(args)
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_restaurant(args)
     elif args.data_name == 'jigsaw':
-        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_data(args)
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_jigsaw(args)
     return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 
