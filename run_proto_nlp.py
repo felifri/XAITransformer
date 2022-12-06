@@ -532,7 +532,7 @@ if __name__ == '__main__':
                                                batch_size=args.batch_size, shuffle=False, pin_memory=True,
                                                num_workers=0)
 
-    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M_{args.num_prototypes}_{fname}_{args.proto_size}_'
+    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M_{args.num_prototypes}_{fname}_{args.data_name}_{args.proto_size}_'
                                                  f'{args.attn}_{args.metric}_{args.pid}')
     args.model_path = os.path.join('./experiments/train_results/', time_stmp, 'best_model.pth.tar')
 
@@ -542,7 +542,7 @@ if __name__ == '__main__':
                       labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
-        model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_*/best_model.pth.tar')
+        model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_{args.data_name}_*/best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
         checkpoint = torch.load(args.model_path)

@@ -519,15 +519,19 @@ def get_toxicity(args):
 ####################################################
 def preprocess_jigsaw(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
-    set_names = ['/train.csv', '/test.csv']
+    set_names = ['/train.csv', '/test.csv', '/test_labels.csv']
     df_train = pd.read_csv(set_dir + set_names[0])
-    df_test = pd.read_csv(set_dir + set_names[1])
+    #df_test = pd.read_csv(set_dir + set_names[1])
+    #df_test_labels = pd.read_csv(set_dir + set_names[2])
+
     text_train = df_train["comment_text"].tolist()
     labels_train = df_train["toxic"].tolist()
-    text_test = df_test["comment_text"].tolist()
-    labels_test = df_test["toxic"].tolist()
+    #text_test = df_test["comment_text"].tolist()
+    #labels_test = df_test_labels["toxic"].tolist()
     #split train set into train val 20:80
     text_train, text_val, labels_train, labels_val = train_test_split(text_train, labels_train, test_size=0.8, random_state=42)
+    #split val into val test 7:1
+    text_val, text_test, labels_val, labels_test = train_test_split(text_train, labels_train, test_size=1/8, random_state=42)
     pickle.dump(text_train, open(set_dir + '/text_train.pkl', 'wb'))
     pickle.dump(labels_train, open(set_dir + '/labels_train.pkl', 'wb'))
     pickle.dump(text_test, open(set_dir + '/text_test.pkl', 'wb'))
@@ -538,7 +542,7 @@ def preprocess_jigsaw(args):
 def get_jigsaw(args):
     set_dir = os.path.join(args.data_dir, args.data_name)
     if not os.path.exists(set_dir + '/text_train.pkl'):
-        preprocess_restaurant(args)
+        preprocess_jigsaw(args)
     text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
     labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
     text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
