@@ -252,8 +252,8 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
 
-        if args.language_model == 'Clip':
-            nearest_image(args, model, proto_texts)
+        # if args.language_model == 'Clip':
+        #     nearest_image(args, model, proto_texts)
 
         proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
@@ -532,7 +532,7 @@ if __name__ == '__main__':
                                                batch_size=args.batch_size, shuffle=False, pin_memory=True,
                                                num_workers=0)
 
-    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M_{args.num_prototypes}_{fname}_{args.data_name}_{args.proto_size}_'
+    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S_{args.num_prototypes}_{fname}_{args.data_name}_{args.proto_size}_'
                                                  f'{args.attn}_{args.metric}_{args.pid}')
     args.model_path = os.path.join('./experiments/train_results/', time_stmp, 'best_model.pth.tar')
 

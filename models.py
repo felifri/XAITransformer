@@ -30,7 +30,8 @@ class ProtoTrexS(nn.Module):
         elif args.language_model == 'SGPT-7.1':
             self.enc_size = 4096
         elif args.language_model == 'Clip':
-            self.enc_size = 512
+            #self.enc_size = 512
+            self.enc_size = 768 #L/14
         self.metric = args.metric
         self.protolayer = nn.Parameter(nn.init.uniform_(torch.empty(1, args.num_prototypes, self.enc_size)),
                                        requires_grad=True)
@@ -79,8 +80,11 @@ class ProtoTrexS(nn.Module):
         elif args.language_model == 'SGPT-125':
             LM = SentenceTransformer('Muennighoff/SGPT-125M-weightedmean-nli-bitfit', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+        # elif args.language_model == 'Clip':
+        #     LM =  SentenceTransformer('clip-ViT-L-14', device=args.gpu[0])
+        #     embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'Clip':
-            LM, preprocess = clip.load('ViT-B/16', f'cuda:{args.gpu[0]}')
+            LM, preprocess = clip.load('ViT-L/14', f'cuda:{args.gpu[0]}')
             # x = preprocess(x).unsqueeze(0)  # in case of image as input
             x = clip.tokenize(x)
             batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
