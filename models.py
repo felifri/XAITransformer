@@ -73,7 +73,7 @@ class ProtoTrexS(nn.Module):
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'SGPT-7.1':
             LM = SentenceTransformer('bigscience/sgpt-bloom-7b1-msmarco', device=args.gpu[0])
-            embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
+            embedding = LM.encode(x, convert_to_tensor=True, batch_size=16, device=args.gpu[0]).cpu().detach()
         elif args.language_model == 'SGPT-5.8':
             LM = SentenceTransformer('Muennighoff/SGPT-5.8B-weightedmean-nli-bitfit', device=args.gpu[0])
             embedding = LM.encode(x, convert_to_tensor=True, device=args.gpu[0]).cpu().detach()
@@ -86,7 +86,7 @@ class ProtoTrexS(nn.Module):
         elif args.language_model == 'Clip':
             LM, preprocess = clip.load('ViT-L/14', f'cuda:{args.gpu[0]}')
             # x = preprocess(x).unsqueeze(0)  # in case of image as input
-            x = clip.tokenize(x)
+            x = clip.tokenize(x, truncate=True)
             batches = torch.utils.data.DataLoader(x, batch_size=200, shuffle=False)
             embedding = []
             for batch in batches:

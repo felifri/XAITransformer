@@ -4,7 +4,7 @@ import glob
 import os
 import random
 from rtpt import RTPT
-
+import torch.nn.functional as F
 import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
@@ -21,7 +21,7 @@ from utils import save_embedding, load_embedding, load_data, visualize_protos, p
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain.')
+                         'prune, add, remove, reinitialize, explain, unique.')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -346,6 +346,24 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
 
         model.protolayer.requires_grad = False
 
+    if 'unique' in args.mode:
+        # load information about all prototypes
+        proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+        # get unique prototypes
+        indices = {}
+        duplicates = []
+        for i, x in enumerate(proto_texts):
+            if x not in indices:
+                indices[x] = i
+            else:
+                similarity = F.cosine_similarity(model.protolayer[:, i], model.protolayer[:, indices[x]], dim=1)
+                similarity = torch.sum(similarity) / args.proto_size
+                print(similarity)
+                if similarity > 0.9:
+                    duplicates.append(i)
+        # remove duplicates from model
+        args, model = remove_prototypes(args, duplicates, model, use_cos=False, use_weight=False)
+
     if 'reinitialize' in args.mode:
         protos2reinit = [0]
         model = reinit_prototypes(args, protos2reinit, model)
@@ -358,6 +376,10 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         _, protos2prune, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             prune_prototypes(args, protos2prune, model, embedding_train, mask_train, text_train, labels_train)
+
+    
+        
+        
 
     # save changed model
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
@@ -551,11 +573,8 @@ if __name__ == '__main__':
         test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
-    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
-            or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode:
-        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
-            interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train,
-                     test_batches, labels_train, text_train, model)
+    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode or 'unique' in args.mode:
+        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model)
     if 'explain' in args.mode:
         explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
                 labels_train)
