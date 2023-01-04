@@ -1,3 +1,4 @@
+
 import argparse
 import datetime
 import glob
@@ -34,7 +35,7 @@ parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'jigsaw',
                                                                              'toxicity_full', 'ethics', 'restaurant',
-                                                                             'movie_review'],
+                                                                             'movie_review', 'propaganda'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -349,20 +350,24 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
     if 'unique' in args.mode:
         # load information about all prototypes
         proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
-        # get unique prototypes
-        indices = {}
-        duplicates = []
+        # sample duplicates in dictionary
+        index = {}
+        prots_to_remove = []
         for i, x in enumerate(proto_texts):
-            if x not in indices:
-                indices[x] = i
+            if x not in index:
+                index[x] = [i]
             else:
-                similarity = F.cosine_similarity(model.protolayer[:, i], model.protolayer[:, indices[x]], dim=1)
-                similarity = torch.sum(similarity) / args.proto_size
-                print(similarity)
-                if similarity > 0.9:
-                    duplicates.append(i)
+                index[x].append(i)
+        # find median prototype for each duplicate and remove all but the closest one, if similarity is high enough
+        for index_list_names, index_list in index.items():
+            selected_tensors = [model.protolayer[:, i] for i in index_list]
+            stacked_tensors = torch.stack(selected_tensors, dim=0)
+            median_tensor = torch.median(stacked_tensors, dim=0)[0]
+            similarites = [F.cosine_similarity(median_tensor, x) for x in selected_tensors]
+            closest_index = similarites.index(max(similarites))
+            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index] and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
         # remove duplicates from model
-        args, model = remove_prototypes(args, duplicates, model, use_cos=False, use_weight=False)
+        args, model = remove_prototypes(args, prots_to_remove, model, use_cos=False, use_weight=False)
 
     if 'reinitialize' in args.mode:
         protos2reinit = [0]
@@ -564,7 +569,7 @@ if __name__ == '__main__':
                       labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
-        model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_{args.data_name}_*/best_model.pth.tar')
+        model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
         checkpoint = torch.load(args.model_path)
