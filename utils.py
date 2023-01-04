@@ -1,4 +1,5 @@
 import os
+import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,11 +19,13 @@ import clip
 from PIL import Image
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
+import argparse
 
 words = set(nltk.corpus.words.words())
 tok = TreebankWordTokenizer()
 detok = TreebankWordDetokenizer()
-
+parser = argparse.ArgumentParser(description='Utils Transformer Prototype Learning')
+parser.add_argument('--keyword', type=str, default='', help='keyword for specifying the dataset')
 
 # __import__("pdb").set_trace()
 
@@ -678,6 +681,48 @@ def get_restaurant(args):
     labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
     return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
+####################################################
+###### load propaganda data #################
+####################################################
+
+def preprocess_propaganda(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    assert os.path.isfile(set_dir + '/proppy_1.0.dev.tsv')
+    assert os.path.isfile(set_dir + '/proppy_1.0.test.tsv')
+    assert os.path.isfile(set_dir + '/proppy_1.0.train.tsv')
+    column_names = ['article_text', 'event_location', 'average_tone', 'article_date', 'article_ID', 'article_URL1', 'MBFC_factuality_label1',\
+        'article_URL2', 'MBFC_factuality_label2', 'URL_to_MBFC_page', 'source_name', 'MBFC_notes_about_source', 'MBFC_bias_label', 'source_URL', 'propaganda_label']
+    train = pd.read_csv(set_dir + '/proppy_1.0.train.tsv', sep='\t', names=column_names)
+    test = pd.read_csv(set_dir + '/proppy_1.0.test.tsv', sep='\t', names=column_names)
+    val = pd.read_csv(set_dir + '/proppy_1.0.dev.tsv', sep='\t', names=column_names)
+    text_train = train['article_text'].tolist()
+    labels_train = train['propaganda_label'].tolist()
+    #labels are -1 and 1 convert to 0 and 1
+    labels_train = [int((label+1)/2) for label in labels_train]
+    text_test = test['article_text'].tolist()
+    labels_test = test['propaganda_label'].tolist()
+    labels_test = [int((label+1)/2) for label in labels_test]
+    text_val = val['article_text'].tolist()
+    labels_val = val['propaganda_label'].tolist()
+    labels_val = [int((label+1)/2) for label in labels_val]
+    pickle.dump(text_train, open(set_dir + '/text_train.pkl', 'wb'))
+    pickle.dump(labels_train, open(set_dir + '/labels_train.pkl', 'wb'))
+    pickle.dump(text_test, open(set_dir + '/text_test.pkl', 'wb'))
+    pickle.dump(labels_test, open(set_dir + '/labels_test.pkl', 'wb'))
+    pickle.dump(text_val, open(set_dir + '/text_val.pkl', 'wb'))
+    pickle.dump(labels_val, open(set_dir + '/labels_val.pkl', 'wb'))
+
+def get_propaganda(args):
+    set_dir = os.path.join(args.data_dir, args.data_name)
+    if not os.path.exists(set_dir + '/text_train.pkl'):
+        preprocess_propaganda(args)
+    text_train = pickle.load(open(set_dir + '/text_train.pkl', 'rb'))
+    labels_train = pickle.load(open(set_dir + '/labels_train.pkl', 'rb'))
+    text_val = pickle.load(open(set_dir + '/text_val.pkl', 'rb'))
+    labels_val = pickle.load(open(set_dir + '/labels_val.pkl', 'rb'))
+    text_test = pickle.load(open(set_dir + '/text_test.pkl', 'rb'))
+    labels_test = pickle.load(open(set_dir + '/labels_test.pkl', 'rb'))
+    return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 ####################################################
 ###### main loading function #######################
@@ -705,6 +750,8 @@ def load_data(args):
         text_train, text_val, text_test, labels_train, labels_val, labels_test = get_restaurant(args)
     elif args.data_name == 'jigsaw':
         text_train, text_val, text_test, labels_train, labels_val, labels_test = get_jigsaw(args)
+    elif args.data_name == 'propaganda':
+        text_train, text_val, text_test, labels_train, labels_val, labels_test = get_propaganda(args)
     return text_train, text_val, text_test, labels_train, labels_val, labels_test
 
 
@@ -825,3 +872,91 @@ def load_images(args, image_dir='SMID_images_400px/img'):
     images = torch.cat(images)
     pickle.dump([fname, images], open(os.path.dirname(path) + '/images.pkl', 'wb'))
     return fname, images
+
+#############################################################
+#############################################################
+#############################################################
+#Functions for automatic evaluation
+def parse_results():
+    import glob
+    import shutil
+    import datetime
+    #store all results in a dictionary
+    results = {}
+    #list all subfolders in test_results -> keep the directory clean, move old test runs to archived!
+    subfolders = os.listdir('experiments/train_results')
+
+    for subfolder in subfolders:
+        if 'archived' in subfolder:
+            continue
+        if args.keyword in subfolder:
+            #open normal test run file and parse it
+            results_files = glob.glob(os.path.join('experiments/train_results', subfolder, '*prototypes.txt'))
+            for results_file in results_files:
+                with open(results_file, 'r') as f:
+                    content = f.read()
+                    model, accuracy, mode = parse_content(content)
+                    if model not in results:
+                        results[model] = [accuracy]
+                    else:
+                        results[model].append(accuracy)
+
+            #open interacted test run file and parse it if it exists
+            interacted_files = glob.glob(os.path.join('experiments/train_results', subfolder, 'interacted_*prototypes.txt'))
+            for interacted_file in interacted_files:
+                with open(interacted_file, 'r') as f:
+                    content = f.read()
+                    interacted_model, accuracy, mode = parse_content(content)
+                    #name model with interacted so we can distinguish it from the normal model
+                    interacted_model = 'interacted_' + interacted_model
+                    if interacted_model not in results:
+                        results[interacted_model] = [accuracy]
+                    else:
+                        results[interacted_model].append(accuracy)
+            #move subfolder to archived after parsing
+            shutil.move(os.path.join('experiments/train_results', subfolder), os.path.join('experiments/train_results', 'archived'))
+    for key in results:
+        #append mean and std to results
+        results[key].append(np.mean(results[key]))
+        results[key].append(np.std(results[key]))
+    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S_{args.keyword}_{mode}_')
+    csv_path = os.path.join('experiments/', time_stmp + 'results.csv')
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    with open(csv_path, 'w', newline='') as csvf:
+        writer = csv.writer(csvf)
+        writer.writerow(['model', 'accuracy1', 'accuracy2', 'accuracy3', 'accuracy4', 'accuracy5', 'mean', 'std'])
+        for key in results:
+            writer.writerow([key, *results[key]])
+    
+        
+            
+
+def parse_content(content):
+    """Parses the contents of a test run file and returns the model name and accuracy
+
+    Args:
+        content (file.read): the output of f.read() on a test run file
+
+    Returns:
+        model: string of model name
+        accuracy: float of accuracy
+    """
+    lines = content.split('\n')
+    for line in lines:
+        if line.startswith('mode:'):
+            mode = line.split(':')[1]
+            mode = mode.strip()
+        elif line.startswith('language_model:'):
+            #only get second part of model line for name
+            model = line.split(':')[1]
+            #remove whitespace
+            model = model.strip()
+        elif line.startswith('test acc:'):
+            accuracy = line.split(':')[1]
+            accuracy = accuracy.strip()
+            accuracy = float(accuracy)
+    return model, accuracy, mode
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    parse_results()

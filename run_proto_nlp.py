@@ -1,10 +1,11 @@
+
 import argparse
 import datetime
 import glob
 import os
 import random
 from rtpt import RTPT
-
+import torch.nn.functional as F
 import torch
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
@@ -21,7 +22,7 @@ from utils import save_embedding, load_embedding, load_data, visualize_protos, p
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain.')
+                         'prune, add, remove, reinitialize, explain, unique.')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -34,7 +35,7 @@ parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'jigsaw',
                                                                              'toxicity_full', 'ethics', 'restaurant',
-                                                                             'movie_review'],
+                                                                             'movie_review', 'propaganda'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -346,6 +347,28 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
 
         model.protolayer.requires_grad = False
 
+    if 'unique' in args.mode:
+        # load information about all prototypes
+        proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+        # sample duplicates in dictionary
+        index = {}
+        prots_to_remove = []
+        for i, x in enumerate(proto_texts):
+            if x not in index:
+                index[x] = [i]
+            else:
+                index[x].append(i)
+        # find median prototype for each duplicate and remove all but the closest one, if similarity is high enough
+        for index_list_names, index_list in index.items():
+            selected_tensors = [model.protolayer[:, i] for i in index_list]
+            stacked_tensors = torch.stack(selected_tensors, dim=0)
+            median_tensor = torch.median(stacked_tensors, dim=0)[0]
+            similarites = [F.cosine_similarity(median_tensor, x) for x in selected_tensors]
+            closest_index = similarites.index(max(similarites))
+            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index] and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
+        # remove duplicates from model
+        args, model = remove_prototypes(args, prots_to_remove, model, use_cos=False, use_weight=False)
+
     if 'reinitialize' in args.mode:
         protos2reinit = [0]
         model = reinit_prototypes(args, protos2reinit, model)
@@ -358,6 +381,10 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         _, protos2prune, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             prune_prototypes(args, protos2prune, model, embedding_train, mask_train, text_train, labels_train)
+
+    
+        
+        
 
     # save changed model
     args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
@@ -542,7 +569,7 @@ if __name__ == '__main__':
                       labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
-        model_paths = glob.glob(f'./experiments/train_results/*_{args.num_prototypes}_{fname}_{args.data_name}_*/best_model.pth.tar')
+        model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
         checkpoint = torch.load(args.model_path)
@@ -551,11 +578,8 @@ if __name__ == '__main__':
         test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
-    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
-            or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode:
-        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
-            interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train,
-                     test_batches, labels_train, text_train, model)
+    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode or 'unique' in args.mode:
+        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model)
     if 'explain' in args.mode:
         explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
                 labels_train)
