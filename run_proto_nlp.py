@@ -1,4 +1,3 @@
-
 import argparse
 import datetime
 import glob
@@ -8,12 +7,13 @@ from rtpt import RTPT
 import torch.nn.functional as F
 import torch
 import numpy as np
+import pandas as pd
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 # from transformers import get_linear_schedule_with_warmup
 from PIL import Image
-
+from collections import Counter
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
@@ -22,7 +22,7 @@ from utils import save_embedding, load_embedding, load_data, visualize_protos, p
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain, unique.')
+                         'prune, add, remove, reinitialize, explain, unique, survey')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -45,10 +45,12 @@ parser.add_argument('-l2', '--lambda2', default=0.2, type=float,
                     help='Weight for prototype cluster loss')
 parser.add_argument('-l3', '--lambda3', default=0.1, type=float,
                     help='Weight for prototype separation loss')
-parser.add_argument('-l4', '--lambda4', default=0.3, type=float,
+parser.add_argument('-l4', '--lambda4', default=0.05, type=float,
                     help='Weight for prototype diversity loss')
-parser.add_argument('-l5', '--lambda5', default=1e-3, type=float,
+parser.add_argument('-l5', '--lambda5', default=0.009, type=float,
                     help='Weight for l1 weight regularization loss')
+parser.add_argument('-l6', '--lambda6', default=0.1, type=float,
+                    help='Weight for kl divergence loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('-g', '--gpu', type=int, default=[0], nargs='+',
@@ -103,6 +105,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
         sep_loss_per_batch = []
         divers_loss_per_batch = []
         l1_loss_per_batch = []
+        kl_loss_per_batch = []
 
         # Update the RTPT
         rtpt.step()
@@ -117,14 +120,15 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
                    args.lambda4 * divers_loss + \
-                   args.lambda5 * l1_loss
+                   args.lambda5 * l1_loss + \
+                   args.lambda6 * kl_loss
 
             _, predicted = torch.max(predicted_label, 1)
             all_preds += predicted.cpu().detach().numpy().tolist()
@@ -134,6 +138,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             optimizer.step()
             with torch.no_grad():
                 model.fc.weight.copy_(model.fc.weight.clamp(max=0.0))
+            
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -142,6 +147,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             sep_loss_per_batch.append(float(args.lambda3 * sep_loss))
             divers_loss_per_batch.append(float(args.lambda4 * divers_loss))
             l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
+            kl_loss_per_batch.append(float(args.lambda6 * kl_loss))
 
         # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
@@ -151,10 +157,11 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
         sep_mean_loss = np.mean(sep_loss_per_batch)
         divers_mean_loss = np.mean(divers_loss_per_batch)
         l1_mean_loss = np.mean(l1_loss_per_batch)
+        kl_mean_loss = np.mean(kl_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
         print(f'Epoch {epoch + 1}, losses: mean {mean_loss:.3f}, ce {ce_mean_loss:.3f}, distr {distr_mean_loss:.3f}, '
               f'clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers {divers_mean_loss:.3f}, '
-              f'l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}')
+              f'l1 {l1_mean_loss:.3f}, kl {kl_mean_loss}, train acc {100 * acc:.3f}')
 
         if ((epoch + 1) % args.val_epoch == 0) and ((epoch + 1) > (num_epochs * 2 // 10)) or (epoch + 1 == num_epochs):
             model.eval()
@@ -170,14 +177,15 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
 
                     # compute individual losses and backward step
                     ce_loss = ce_crit(predicted_label, label_batch)
-                    distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
+                    distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
                         proto_loss(prototype_distances, label_batch, model, args)
                     loss = ce_loss + \
                            args.lambda1 * distr_loss + \
                            args.lambda2 * clust_loss + \
                            args.lambda3 * sep_loss + \
                            args.lambda4 * divers_loss + \
-                           args.lambda5 * l1_loss
+                           args.lambda5 * l1_loss + \
+                           args.lambda6 * kl_loss
 
                     losses_per_batch.append(float(loss))
                     _, predicted = torch.max(predicted_label, 1)
@@ -226,14 +234,15 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 
             # compute individual losses
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
                    args.lambda4 * divers_loss + \
-                   args.lambda5 * l1_loss
+                   args.lambda5 * l1_loss + \
+                   args.lambda6 * kl_loss
 
             losses_per_batch.append(float(loss))
             _, predicted = torch.max(predicted_label, 1)
@@ -320,6 +329,146 @@ def query(args, train_batches_unshuffled, labels_train, text_train, model):
     txt_file.write(f'\nwith:\nsimilarity * weight = score')
     txt_file.close()
 
+def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model):
+    '''
+    Function samples 100 datapoints from the test set and creates 4(8) different csv files.
+    Each file contains a random permutation of the 100 datapoints then they differ:
+    1st csv contains only the datapoints
+    2nd csv contains datapoints with random explanations picked from the prototypes of the model
+    3rd csv contains datapoints with the best explanation given by inference
+    4th csv contains datapoints with the best explanation as well as the prediction of the model
+    
+    For each of the csvs there is a corresponding csv with the true labels of the datapoints.
+    '''
+    mode = "Steerable" #set which type of survey you want to create
+    print('\nCreating Survey, loading model:', args.model_path)
+    model.eval()
+    _, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    if mode == "ProtoTex":
+        rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex-Survey', max_iterations=100)
+        rtpt.start()
+        # load 100 random examples from test set and their corresponding labels
+        zipped_elements = list(zip(text_test, labels_test))
+        random_elements = random.sample(zipped_elements, 100)
+        random_texts, random_labels = zip(*random_elements)
+        # create a dictionary that will keep track of all necessary values
+        dictionary = {}
+        dictionary['Input'] = random_texts
+        dictionary['True Label'] = random_labels
+        
+        # iterate over each entry in the dictionary and add the predicted labels as well as the explanations to the dictionary
+        for text in random_texts:
+            rtpt.step()
+            args.query = text
+            embedding_query, mask_query = model.compute_embedding(args.query, args)
+            embedding_query = embedding_query.to(f'cuda:{args.gpu[0]}')
+            mask_query = mask_query.to(f'cuda:{args.gpu[0]}')
+            args.query = args.query[0]
+            torch.cuda.empty_cache() # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+        
+            prototype_distances, predicted_label = model.forward(embedding_query, mask_query)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            query2proto = torch.topk(prototype_distances.cpu().detach().squeeze(), k=1, largest=False)
+            nearest_proto = proto_texts[query2proto[1]]
+        
+            #add prediction to dictionary
+            if "prediction" not in dictionary:
+                dictionary["prediction"] = [int(predicted)]
+            else:
+                dictionary["prediction"].append(int(predicted))
+            #add explanation to dictionary
+            if "explanation" not in dictionary:
+                dictionary["explanation"] = [nearest_proto]
+            else:
+                dictionary["explanation"].append(nearest_proto)
+            #add random explanation to dictionary
+            if "random explanation" not in dictionary:
+                dictionary["random explanation"] = [random.choice(proto_texts)]
+            else:
+                dictionary["random explanation"].append(random.choice(proto_texts))
+                
+        # create a dataframe from the dictionary
+        csv_df4 = pd.DataFrame(dictionary)
+        csv_path4 = os.path.join(os.path.dirname(args.model_path), 'survey4.csv')
+        with open(csv_path4, 'w') as f:
+            csv_df4.to_csv(f, index=False)
+        # create a dataframe with only the input and randomize the order of the rows
+        csv_df1 = csv_df4.drop(columns=['prediction', 'explanation', 'random explanation'])
+        csv_df1 = csv_df1.sample(frac=1).reset_index(drop=True)
+        csv_path1 = os.path.join(os.path.dirname(args.model_path), 'survey1.csv')
+        with open(csv_path1, 'w') as f:
+            csv_df1.to_csv(f, index=False)
+        # create a dataframe with only the input and the random explanation and randomize the order of the rows
+        csv_df2 = csv_df4.drop(columns=['prediction', 'explanation'])
+        csv_df2 = csv_df2.sample(frac=1).reset_index(drop=True)
+        csv_path2 = os.path.join(os.path.dirname(args.model_path), 'survey2.csv')
+        with open(csv_path2, 'w') as f:
+            csv_df2.to_csv(f, index=False)
+        # create a dataframe with only the input and the explanation and randomize the order of the rows
+        csv_df3 = csv_df4.drop(columns=['prediction', 'random explanation'])
+        csv_df3 = csv_df3.sample(frac=1).reset_index(drop=True)
+        csv_path3 = os.path.join(os.path.dirname(args.model_path), 'survey3.csv')
+        with open(csv_path3, 'w') as f:
+            csv_df3.to_csv(f, index=False)
+    elif mode == "Steerable":
+        rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex-Survey', max_iterations=100)
+        rtpt.start()
+        # load 100 random examples from test set and their corresponding labels
+        zipped_elements = list(zip(text_test, labels_test))
+        random_elements = random.sample(zipped_elements, 100)
+        random_texts, random_labels = zip(*random_elements)
+        # create a dictionary that will keep track of all necessary values
+        dictionary = {}
+        dictionary['Input'] = random_texts
+        dictionary['True Label'] = random_labels
+        for text in random_texts:
+            rtpt.step()
+            args.query = text
+            embedding_query, mask_query = model.compute_embedding(args.query, args)
+            embedding_query = embedding_query.to(f'cuda:{args.gpu[0]}')
+            mask_query = mask_query.to(f'cuda:{args.gpu[0]}')
+            args.query = args.query[0]
+            #torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
+            # "convert" prototype embedding to text (take text of nearest training sample)
+            _, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+            prototype_distances, predicted_label = model.forward(embedding_query, mask_query)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            k = 5 #args.num_prototypes
+            query2proto = torch.topk(prototype_distances.cpu().detach().squeeze(), k=k, largest=False)
+            weights = model.get_proto_weights()
+            weight = - weights[query2proto[1], predicted]
+            similarity = - query2proto[0]
+            scores = []
+            #print(len(weight), len(similarity))
+            for i in range(k):
+                scores.append(float(weight[i] * similarity[i]))
+            sorted_scores = sorted(scores, reverse=True)
+            index_scores = list(zip(range(len(scores)),sorted_scores))
+            
+            if "prediction" not in dictionary:
+                dictionary["prediction"] = [int(predicted)]
+            else:
+                dictionary["prediction"].append(int(predicted))
+            #add explanation to dictionary
+            for i in range(3):
+                index, score = index_scores[i]
+                nearest_proto = proto_texts[query2proto[1][index]]
+                if f"explanation {i}" not in dictionary:
+                    dictionary[f"explanation {i}"] = [nearest_proto]
+                else:
+                    dictionary[f"explanation {i}"].append(nearest_proto)
+            #add random explanation to dictionary
+            for i in range(2):
+                if f"random explanation {i}" not in dictionary:
+                    dictionary[f"random explanation {i}"] = [random.choice(proto_texts)]
+                else:
+                    dictionary[f"random explanation {i}"].append(random.choice(proto_texts))
+        csv_df = pd.DataFrame(dictionary)
+        csv_path = os.path.join(os.path.dirname(args.model_path), 'steerable_survey.csv')
+        with open(csv_path, 'w') as f:
+            csv_df.to_csv(f, index=False)
+            
 
 def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches,
              labels_train, text_train, model):
@@ -348,6 +497,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         model.protolayer.requires_grad = False
 
     if 'unique' in args.mode:
+        
         # load information about all prototypes
         proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         # sample duplicates in dictionary
@@ -365,7 +515,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
             median_tensor = torch.median(stacked_tensors, dim=0)[0]
             similarites = [F.cosine_similarity(median_tensor, x) for x in selected_tensors]
             closest_index = similarites.index(max(similarites))
-            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index] and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
+            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index]]) #and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
         # remove duplicates from model
         args, model = remove_prototypes(args, prots_to_remove, model, use_cos=False, use_weight=False)
 
@@ -511,10 +661,16 @@ if __name__ == '__main__':
 
     if args.num_prototypes % args.num_classes:
         print('number of prototypes should be divisible by number of classes')
-        args.num_prototypes -= args.num_prototypes % args.num_classes
+    #    args.num_prototypes -= args.num_prototypes % args.num_classes
     # define which prototype belongs to which class (onehot encoded matrix)
     args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes // args.num_classes, 1
                                                                        ).to(f'cuda:{args.gpu[0]}')
+
+    # compute class distribution once
+    class_counts = Counter(labels_train)
+    args.dataset_class_distribution = {i: class_counts[i] / len(labels_train) for i in range(args.num_classes)}
+    args.dataset_class_distribution = torch.tensor(list(args.dataset_class_distribution.values()), dtype=torch.float32).unsqueeze(0)
+    print("dataset_class_distribution:", args.dataset_class_distribution)
 
     model = []
     if args.level == 'word':
@@ -585,3 +741,6 @@ if __name__ == '__main__':
                 labels_train)
     if 'faithful' in args.mode:
         faithful(args, embedding_test, mask_test, text_test, labels_test, model)
+    if 'survey' in args.mode:
+        survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model)
+        
