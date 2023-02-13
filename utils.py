@@ -150,11 +150,11 @@ def visualize_protos(args, embedding, mask, labels, prototypes, model, proto_lab
 
 
 def proto_loss(prototype_distances, label, model, args):
-    model_weights = model.get_proto_weights()
-    min_indices = np.argmax(model_weights, axis=0)
-    results = np.zeros((model_weights.shape))
-    results[min_indices, np.arange(model_weights.shape[1])] = 1
-    args.prototype_class_identity = torch.tensor(results).to(f'cuda:{args.gpu[0]}')
+    # model_weights = model.get_proto_weights()
+    # min_indices = np.argmax(model_weights, axis=0)
+    # results = np.zeros((model_weights.shape))
+    # results[min_indices, np.arange(model_weights.shape[1])] = 1
+    # args.prototype_class_identity = torch.tensor(results).to(f'cuda:{args.gpu[0]}')
     max_dist = torch.prod(torch.tensor(model.protolayer.size()))  # proxy variable, could be any high value
 
     # prototypes_of_correct_class is tensor of shape  batch_size * num_prototypes
@@ -176,18 +176,10 @@ def proto_loss(prototype_distances, label, model, args):
     # put penalty only onlyon prototypes of same class
     comb = torch.combinations(torch.arange(0, args.num_prototypes), r=2)
     if args.metric == 'cosine':
-        divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:, comb][:, :, 0],  model.protolayer[:, comb][:, :, 1]).squeeze().clamp(min=0.8))
-        #divers_loss = torch.mean(torch.min(F.cosine_similarity(model.protolayer[:, comb].unsqueeze(1), model.protolayer[:, comb].unsqueeze(2)),-1))
-        #divers_loss = torch.mean(torch.min(F.cosine_similarity(model.protolayer[:, comb].unsqueeze(1), model.protolayer[:, comb].unsqueeze(2)),-1).values)
-        #divers_loss = - torch.mean(torch.min(F.cosine_similarity(model.protolayer[:, comb].unsqueeze(1), model.protolayer[:, comb].unsqueeze(2)),-1).values)
+        divers_loss = torch.mean(F.cosine_similarity(model.protolayer[:, comb][:, :, 0],  model.protolayer[:, comb][:, :, 1]).squeeze()) #.clamp(min=0.8)
 
     elif args.metric == 'L2':
-        divers_loss = torch.mean(nes_torch(model.protolayer[:, comb][:, :, 0], model.protolayer[:, comb][:, :, 1], dim=2).squeeze().clamp(min=0.8))
-        """
-        d_min = 2.0
-        difference = d_min - torch.norm(model.protolayer[:, comb].unsqueeze(1) - model.protolayer[:, comb].unsqueeze(2), p=2, dim=-1)
-        divers_loss = torch.mean(torch.max(difference, torch.zeros_like(difference)))
-        """
+        divers_loss = torch.mean(nes_torch(model.protolayer[:, comb][:, :, 0], model.protolayer[:, comb][:, :, 1], dim=2).squeeze()) #.clamp(min=0.8)
 
     if args.soft:
         soft_loss = - torch.mean(F.cosine_similarity(model.protolayer[:, args.soft[1]], args.soft[4].squeeze(0),
@@ -198,14 +190,10 @@ def proto_loss(prototype_distances, label, model, args):
 
     # l1 loss on classification layer weights, scaled by number of prototypes
     l1_loss = model.fc.weight.norm(p=1) / args.num_prototypes
-
-    # kl divergence loss
     
-    class_probs = torch.mean(args.prototype_class_identity, dim=0).cpu()
-    kl_loss = - torch.sum(class_probs * (torch.log(class_probs) - torch.log(args.dataset_class_distribution)), dim=-1)
-    kl_loss = kl_loss.to(f'cuda:{args.gpu[0]}')
     
-    return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss
+    
+    return distr_loss, clust_loss, sep_loss, divers_loss, l1_loss
 
 
 def project(args, embedding_train, model, train_batches_unshuffled, text_train, labels_train):

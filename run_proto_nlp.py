@@ -43,14 +43,14 @@ parser.add_argument('-l1', '--lambda1', default=0.2, type=float,
                     help='Weight for prototype distribution loss')
 parser.add_argument('-l2', '--lambda2', default=0.2, type=float,
                     help='Weight for prototype cluster loss')
-parser.add_argument('-l3', '--lambda3', default=0.1, type=float,
+parser.add_argument('-l3', '--lambda3', default=0.2, type=float,
                     help='Weight for prototype separation loss')
-parser.add_argument('-l4', '--lambda4', default=0.05, type=float,
+parser.add_argument('-l4', '--lambda4', default=0.3, type=float,
                     help='Weight for prototype diversity loss')
-parser.add_argument('-l5', '--lambda5', default=0.009, type=float,
+parser.add_argument('-l5', '--lambda5', default=1e-3, type=float,
                     help='Weight for l1 weight regularization loss')
-parser.add_argument('-l6', '--lambda6', default=0.1, type=float,
-                    help='Weight for kl divergence loss')
+parser.add_argument('-l6', '--lambda6', default=1, type=float,
+                    help='Weight for class loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('-g', '--gpu', type=int, default=[0], nargs='+',
@@ -74,7 +74,7 @@ parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
 parser.add_argument('--query', type=str, default=['I do not like the food here'], nargs='+',
                     help='Type your query to test the model and get classification explanation')
-parser.add_argument('--metric', type=str, default='cosine', choices=['cosine', 'L2'],
+parser.add_argument('--metric', type=str, default='L2', choices=['cosine', 'L2'],
                     help='What metric should be used to compute the distance/ similarity?')
 parser.add_argument('--attn', type=str, default=False,
                     help='Whether to use self-attention on the word embeddings before distance computation')
@@ -105,7 +105,6 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
         sep_loss_per_batch = []
         divers_loss_per_batch = []
         l1_loss_per_batch = []
-        kl_loss_per_batch = []
 
         # Update the RTPT
         rtpt.step()
@@ -120,15 +119,14 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
 
             # compute individual losses and backward step
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
                    args.lambda4 * divers_loss + \
-                   args.lambda5 * l1_loss + \
-                   args.lambda6 * kl_loss
+                   args.lambda5 * l1_loss
 
             _, predicted = torch.max(predicted_label, 1)
             all_preds += predicted.cpu().detach().numpy().tolist()
@@ -147,7 +145,6 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             sep_loss_per_batch.append(float(args.lambda3 * sep_loss))
             divers_loss_per_batch.append(float(args.lambda4 * divers_loss))
             l1_loss_per_batch.append(float(args.lambda5 * l1_loss))
-            kl_loss_per_batch.append(float(args.lambda6 * kl_loss))
 
         # scheduler.step()
         mean_loss = np.mean(losses_per_batch)
@@ -157,11 +154,10 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
         sep_mean_loss = np.mean(sep_loss_per_batch)
         divers_mean_loss = np.mean(divers_loss_per_batch)
         l1_mean_loss = np.mean(l1_loss_per_batch)
-        kl_mean_loss = np.mean(kl_loss_per_batch)
         acc = balanced_accuracy_score(all_labels, all_preds)
         print(f'Epoch {epoch + 1}, losses: mean {mean_loss:.3f}, ce {ce_mean_loss:.3f}, distr {distr_mean_loss:.3f}, '
               f'clust {clust_mean_loss:.3f}, sep {sep_mean_loss:.3f}, divers {divers_mean_loss:.3f}, '
-              f'l1 {l1_mean_loss:.3f}, kl {kl_mean_loss}, train acc {100 * acc:.3f}')
+              f'l1 {l1_mean_loss:.3f}, train acc {100 * acc:.3f}')
 
         if ((epoch + 1) % args.val_epoch == 0) and ((epoch + 1) > (num_epochs * 2 // 10)) or (epoch + 1 == num_epochs):
             model.eval()
@@ -177,15 +173,14 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
 
                     # compute individual losses and backward step
                     ce_loss = ce_crit(predicted_label, label_batch)
-                    distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
+                    distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                         proto_loss(prototype_distances, label_batch, model, args)
                     loss = ce_loss + \
                            args.lambda1 * distr_loss + \
                            args.lambda2 * clust_loss + \
                            args.lambda3 * sep_loss + \
                            args.lambda4 * divers_loss + \
-                           args.lambda5 * l1_loss + \
-                           args.lambda6 * kl_loss
+                           args.lambda5 * l1_loss
 
                     losses_per_batch.append(float(loss))
                     _, predicted = torch.max(predicted_label, 1)
@@ -234,15 +229,14 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 
             # compute individual losses
             ce_loss = ce_crit(predicted_label, label_batch)
-            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss, kl_loss = \
+            distr_loss, clust_loss, sep_loss, divers_loss, l1_loss = \
                 proto_loss(prototype_distances, label_batch, model, args)
             loss = ce_loss + \
                    args.lambda1 * distr_loss + \
                    args.lambda2 * clust_loss + \
                    args.lambda3 * sep_loss + \
                    args.lambda4 * divers_loss + \
-                   args.lambda5 * l1_loss + \
-                   args.lambda6 * kl_loss
+                   args.lambda5 * l1_loss
 
             losses_per_batch.append(float(loss))
             _, predicted = torch.max(predicted_label, 1)
