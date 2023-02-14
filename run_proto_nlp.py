@@ -450,8 +450,10 @@ def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, 
                 nearest_proto = proto_texts[query2proto[1][index]]
                 if f"explanation {i}" not in dictionary:
                     dictionary[f"explanation {i}"] = [nearest_proto]
+                    dictionary[f"score {i}"] = [score]
                 else:
                     dictionary[f"explanation {i}"].append(nearest_proto)
+                    dictionary[f"score {i}"].append(score)
             #add random explanation to dictionary
             for i in range(2):
                 if f"random explanation {i}" not in dictionary:
