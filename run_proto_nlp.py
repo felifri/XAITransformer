@@ -205,7 +205,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
                 best_acc = 0
                 model, args = project(args, embedding_train, model, train_batches_unshuffled, text_train, labels_train)
                 model.protolayer.requires_grad = False
-
+    
     model.load_state_dict(state['state_dict'])
     torch.save(state, args.model_path)
     return model
@@ -450,10 +450,10 @@ def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, 
                 nearest_proto = proto_texts[query2proto[1][index]]
                 if f"explanation {i}" not in dictionary:
                     dictionary[f"explanation {i}"] = [nearest_proto]
-                    dictionary[f"score {i}"] = [score]
+                    dictionary[f"score {i}"] = [f"sim {similarity[index]} * weight {weight[index]} = {score}"]
                 else:
                     dictionary[f"explanation {i}"].append(nearest_proto)
-                    dictionary[f"score {i}"].append(score)
+                    dictionary[f"score {i}"].append(f"sim {similarity[index]} * weight {weight[index]} = {score}")
             #add random explanation to dictionary
             for i in range(2):
                 if f"random explanation {i}" not in dictionary:
@@ -637,6 +637,35 @@ def faithful(args, embedding_test, mask_test, text_test, labels_test, model, k=1
         writer.writerows(explained_test_samples)
 
 
+def remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train):
+    #if prototype is weighted wrongly, delete it and retrain only last fc layer
+    protos_del = []
+    proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    weights = model.get_proto_weights()
+    s = 'label'
+    proto_labels = torch.tensor([int(p[p.index(s) + len(s) + 1]) for p in proto_info])
+    proto_labels = torch.stack((1 - proto_labels, proto_labels), dim=1)
+    proto_labels = proto_labels.argmax(dim=1)
+    weights = np.argmin(weights, axis=1)
+    # print('proto labels:', proto_labels, 'weights:', weights)
+    # if index of max in weights is not the same as the label, add to list of prototypes to delete
+    protos_del = [i for i, (w, l) in enumerate(zip(weights, proto_labels)) if w != l]
+    # print ('protos to delete:', protos_del)
+    if len(protos_del) > 0:
+        print('Deleting wrong prototypes:', protos_del)
+        args, model = remove_prototypes(args, protos_del, model, use_cos=False)
+        args.model_path = os.path.join(os.path.dirname(args.model_path), 'reduced_best_model.pth.tar')
+        args.num_epochs = 100
+        args.project = False
+        model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
+                  labels_train)
+    else:
+        print('No wrong prototypes found')
+        
+    args.num_prototypes = model.num_prototypes
+    
+    return model
+
 if __name__ == '__main__':
     # torch.manual_seed(0)
     # np.random.seed(0)
@@ -719,6 +748,7 @@ if __name__ == '__main__':
         os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
         model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                       labels_train)
+        model = remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
         model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
