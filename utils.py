@@ -935,8 +935,6 @@ def parse_results():
             writer.writerow([key, *results[key]])
     
         
-            
-
 def parse_content(content):
     """Parses the contents of a test run file and returns the model name and accuracy
 
@@ -962,6 +960,50 @@ def parse_content(content):
             accuracy = accuracy.strip()
             accuracy = float(accuracy)
     return model, accuracy, mode
+
+
+def transform_explain(args, path):
+    df = pd.read_csv(path)
+    df = df[df["true label \n"] == df["predicted label \n"]]
+    
+    cols = [f"score_{i} \n" for i in range(1, args.num_prototypes+1)]
+    cols = df[cols].idxmax(axis=1)
+    expl = cols.str.replace("score", "explanation")
+    naming = {}
+    for i in range(1, args.num_prototypes+1):
+        naming[f"explanation_{i} \n"] = i * 5
+    strings = [df.iloc[i, naming[expl.iloc[i]]] for i in range(len(expl))]
+    result = df[["test sample \n", "true label \n"]]
+    result["expl \n"] = strings
+    
+    dit = {}
+    i = 0
+    for sen in strings:
+        if sen not in dit:
+            dit[sen] = i
+            i = i + 1
+    indices = [dit[sen] for sen in strings]
+    result["indices \n"] = indices
+    
+    group_counts = result['indices \n'].value_counts()
+    single_groups = group_counts[group_counts == 1].index.to_list()
+    result = result[~result['indices \n'].isin(single_groups)]
+    
+    npath = os.path.join(os.path.dirname(path), "explained_modded.csv")
+    result.to_csv(npath)
+    
+    X = result[['test sample \n', 'expl \n']]
+    y = result['true label \n']
+    groups = result['indices \n']
+
+    num_examples = 50
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=num_examples/len(expl), random_state=42, stratify=groups)
+    X_train.to_csv(os.path.join(os.path.dirname(path), "X_train.csv"), index=False)
+    X_test.to_csv(os.path.join(os.path.dirname(path), "X_test.csv"), index=False)
+    y_train.to_csv(os.path.join(os.path.dirname(path), "y_train.csv"), index=False)
+    y_test.to_csv(os.path.join(os.path.dirname(path), "y_test.csv"), index=False)
+
+
 
 if __name__ == '__main__':
     args = parser.parse_args()

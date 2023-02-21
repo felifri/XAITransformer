@@ -17,7 +17,7 @@ from collections import Counter
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
-    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw
+    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
@@ -450,10 +450,10 @@ def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, 
                 nearest_proto = proto_texts[query2proto[1][index]]
                 if f"explanation {i}" not in dictionary:
                     dictionary[f"explanation {i}"] = [nearest_proto]
-                    dictionary[f"score {i}"] = [f"sim {similarity[index]} * weight {weight[index]} = {score}"]
+                    dictionary[f"score {i}"] = [f"sim {float(similarity[index]):.3f} * weight {float(weight[index]):.3f} = {float(score):.3f}"]
                 else:
                     dictionary[f"explanation {i}"].append(nearest_proto)
-                    dictionary[f"score {i}"].append(f"sim {similarity[index]} * weight {weight[index]} = {score}")
+                    dictionary[f"score {i}"].append(f"sim {float(similarity[index]):.3f} * weight {float(weight[index]):.3f} = {float(score):.3f}")
             #add random explanation to dictionary
             for i in range(2):
                 if f"random explanation {i}" not in dictionary:
@@ -591,10 +591,11 @@ def explain(args, embedding_test, mask_test, text_test, labels_test, model, trai
     with open(save_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerows(explained_test_samples)
+        
+    transform_explain(args, save_path)
 
 
 def faithful(args, embedding_test, mask_test, text_test, labels_test, model, k=1):
-    import pandas as pd
     data_explained = pd.read_csv(os.path.join(os.path.dirname(args.model_path), 'explained_normal.csv'))
 
     score = ['score_1 \n', 'score_2 \n', 'score_3 \n', 'score_4 \n', 'score_5 \n', 'score_6 \n', 'score_7 \n',
@@ -647,10 +648,8 @@ def remove_false(args, train_batches, val_batches, model, embedding_train, train
     proto_labels = torch.stack((1 - proto_labels, proto_labels), dim=1)
     proto_labels = proto_labels.argmax(dim=1)
     weights = np.argmin(weights, axis=1)
-    # print('proto labels:', proto_labels, 'weights:', weights)
     # if index of max in weights is not the same as the label, add to list of prototypes to delete
     protos_del = [i for i, (w, l) in enumerate(zip(weights, proto_labels)) if w != l]
-    # print ('protos to delete:', protos_del)
     if len(protos_del) > 0:
         print('Deleting wrong prototypes:', protos_del)
         args, model = remove_prototypes(args, protos_del, model, use_cos=False)
@@ -665,6 +664,8 @@ def remove_false(args, train_batches, val_batches, model, embedding_train, train
     args.num_prototypes = model.num_prototypes
     
     return model
+  
+    
 
 if __name__ == '__main__':
     # torch.manual_seed(0)
