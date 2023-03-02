@@ -17,12 +17,12 @@ from collections import Counter
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
-    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain
+    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain, robustness
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain, unique, survey')
+                         'prune, add, remove, reinitialize, explain, unique, survey, robustness')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -68,6 +68,10 @@ parser.add_argument('--level', type=str, default='word', choices=['word', 'sente
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'GPTJ', 'TXL',
                                                                            'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', 'all-mpnet', 'SGPT-5.8', 'SGPT-125', 'SGPT-7.1'],
                     help='Define which language model to use')
+parser.add_argument('--robustness', type=str, default='facts', choices=['facts', 'positive', 'negative', 'pos_neg'],
+                    help='type of string replacement to test robustness')
+parser.add_argument('--robustness_percentage', type=int, default=10,
+                    help='Percentage of prototypes to be replaced in robustness test (10 = 10%)')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
 parser.add_argument('--compute_emb', type=bool, default=False,
@@ -84,6 +88,7 @@ parser.add_argument('--soft', type=str, default=False, nargs='+',
                     help='Whether to softly apply loss')
 parser.add_argument('--pid', type=str, default='',
                     help='Name for process')
+
 
 
 def train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train):
@@ -253,6 +258,8 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 
         if os.path.basename(args.model_path).startswith('interacted'):
             fname = 'interacted_' + str(args.num_prototypes) + 'prototypes.txt'
+        elif os.path.basename(args.model_path).startswith('robustness'):
+            fname = f"robustness_{args.robustness}_{args.robustness_percentage}.txt"
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
 
@@ -528,14 +535,26 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             prune_prototypes(args, protos2prune, model, embedding_train, mask_train, text_train, labels_train)
 
-    
+    if 'robustness' in args.mode:
+        protos2replace = robustness(args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled)
+        for i in range(len(protos2replace)):
+            args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
+                replace_prototypes(args, protos2replace[i], model, embedding_train, mask_train, text_train, labels_train)
+        
+        model.protolayer.requires_grad = False
         
         
 
     # save changed model
-    args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
+    if "robustness" in args.mode:
+        args.model_path = os.path.join(os.path.dirname(args.model_path), f'robustness_{args.robustness}_{args.robustness_percentage}.pth.tar')
+    else:
+        args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain only retrain last layer (fc)
-    args.num_epochs = 100
+    if "robustness" in args.mode:
+        args.num_epochs = 10
+    else:
+        args.num_epochs = 100
     args.project = False
     model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                   labels_train)
@@ -544,7 +563,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
 
 
 def explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
-            labels_train):
+            labels_train, embedding_val, mask_val, text_val, labels_val):
     print('\nExplain each test sample, loading model:', args.model_path)
     model.eval()
 
@@ -575,6 +594,27 @@ def explain(args, embedding_test, mask_test, text_test, labels_test, model, trai
             top_scores = similarity_score
 
             values = [''.join(text_test[i]) + '\n', f'{int(labels_test[i])}\n', f'{int(predicted)}\n',
+                      f'{probability[0]:.3f}\n', f'{probability[1]:.3f}\n']
+            for j in range(args.num_prototypes):
+                idx = j
+                nearest_proto = proto_texts[idx]
+                values.append(f'{nearest_proto}\n')
+                values.append(f'{idx + 1}\n')
+                values.append(f'{float(-prototype_distances[:, idx]):.3f}\n')
+                values.append(f'{float(-weights[idx, predicted]):.3f}\n')
+                values.append(f'{float(top_scores[j]):.3f}\n')
+            explained_test_samples.append(values)
+        
+        for i in range(len(labels_val)):
+            emb = embedding_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
+            mask = mask_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
+            prototype_distances, predicted_label = model.forward(emb, mask)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            probability = torch.nn.functional.softmax(predicted_label, dim=1).squeeze().tolist()
+            similarity_score = prototype_distances.cpu().detach().squeeze() * weights[:, predicted]
+            top_scores = similarity_score
+
+            values = [''.join(text_val[i]) + '\n', f'{int(labels_val[i])}\n', f'{int(predicted)}\n',
                       f'{probability[0]:.3f}\n', f'{probability[1]:.3f}\n']
             for j in range(args.num_prototypes):
                 idx = j
@@ -761,11 +801,11 @@ if __name__ == '__main__':
         test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
-    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode or 'unique' in args.mode:
+    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode or 'unique' in args.mode or 'robustness' in args.mode:
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model)
     if 'explain' in args.mode:
         explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
-                labels_train)
+                labels_train, embedding_val, mask_val, text_val, labels_val)
     if 'faithful' in args.mode:
         faithful(args, embedding_test, mask_test, text_test, labels_test, model)
     if 'survey' in args.mode:

@@ -21,6 +21,7 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 import argparse
 
+
 words = set(nltk.corpus.words.words())
 tok = TreebankWordTokenizer()
 detok = TreebankWordDetokenizer()
@@ -262,9 +263,9 @@ def replace_prototypes(args, protos2replace, model, embedding_train, mask_train,
             protos2replace_e = protos2replace_e.view(1, -1, model.enc_size, args.proto_size).to(f'cuda:{args.gpu[0]}')
 
         model.protolayer[:, idx] = nn.Parameter(protos2replace_e, requires_grad=False)
-        weights = model.fc.weight.detach().clone()
-        weights[:, idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
-        model.fc.weight.copy_(weights)
+        # weights = model.fc.weight.detach().clone()
+        # weights[:, idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
+        # model.fc.weight.copy_(weights)
         embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = extent_data(args,
                                                                                                       embedding_train,
                                                                                                       mask_train,
@@ -277,6 +278,118 @@ def replace_prototypes(args, protos2replace, model, embedding_train, mask_train,
     return args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled
 
 
+def robustness(args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled):
+    # 4 modes of replacements: 1) replace with facts, 2) replace positive explanations with optimal ones 3) replace negative explanations with optimal ones 4) replace with optimal explanations
+    # Steps: 1. get prototypes and their classes 2. get % of prototypes to replace 3. specify what to replace with 4. iterate over array to replace one by one
+    proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    s = 'label'
+    proto_labels = torch.tensor([int(p[p.index(s) + len(s) + 1]) for p in proto_info])
+    proto_labels = torch.stack((1 - proto_labels, proto_labels), dim=1)
+    class_distribs = torch.sum(proto_labels, dim=0).float() / torch.sum(proto_labels)
+    protos_to_replace = []
+    
+    if args.robustness == 'facts':
+        FACTS = ["Animals are multicellular, eukaryotic organisms that belong to the kingdom Animalia.", 
+                "About 15,000-20,000 new animal species are discovered every year.", 
+                "A butterfly has about 12,000 eyes.", 
+                "Tigers have striped skin, not just striped fur."
+                "Jellyfish are made up of 95% water.",
+                "The loudest animal in the world is a 2cm long prawn called Pistol Shrimp.",
+                "Flamingos are not pink; they get their color from their diet of brine shrimp and algae.",
+                "Otters hold hands while sleeping to keep from drifting apart.",
+                "Elephants can recognize themselves in a mirror.",
+                "Sloths can take up to a month to digest a single leaf.",
+                "The blue whale is the largest animal that ever lived.",
+                "The cheetah is the fastest land animal, reaching speeds of up to 120 km/h.",
+                "The great white shark can detect a drop of blood in 25 liters of water.",
+            	"The hummingbird is the only bird that can fly backwards.",
+                "The platypus is one of the few mammals that lay eggs instead of giving birth.",
+                "The octopus has three hearts, nine brains and blue blood.",
+                "The giraffe has a tongue that is about 50 cm long and can clean its ears with it.",
+                "The kangaroo can jump up to 9 meters in a single leap.",
+                "The koala sleeps for up to 22 hours a day.",
+                "The axolotl can regenerate its limbs, tail, heart and even parts of its brain",
+                "Cats have a free-floating collarbone that enables them to fit through tight spaces and land safely after falls."]
+        
+        num_protos_to_replace = int(args.robustness_percentage / 100 * args.num_prototypes)
+        if num_protos_to_replace > 20:
+            print(f'Only 20 facts available, replacing {num_protos_to_replace} with facts')
+            num_protos_to_replace = 20
+        # get unique random facts
+        facts = np.random.choice(FACTS, num_protos_to_replace, replace=False)
+        # get random prototypes of pos and neg to replace according to class distribution
+        pos_indices = np.random.choice(np.where(proto_labels[:, 1] == 1)[0], int(num_protos_to_replace * class_distribs[1]), replace=False)
+        neg_indices = np.random.choice(np.where(proto_labels[:, 1] == 0)[0], int(num_protos_to_replace * class_distribs[0]), replace=False)
+        # add protos to protos to replace array [[text, index, class id]]
+        k = 0
+        for i in range(len(pos_indices)):
+            protos_to_replace.append([facts[k], pos_indices[i], 1])
+            k = k + 1
+        for i in range(len(neg_indices)):
+            protos_to_replace.append([facts[k], neg_indices[i], 0])
+            k = k + 1
+        
+    POSITIVE = ["Showing filmmaking, photography, and performance skills, this is a story.",
+                "With a good message and actors, this movie is funny, happy, and positive.",
+                "Action, suspense, comedy, plot, and effects make this movie exciting and fun.",
+                "This drama shows life and its challenges realistically and emotionally, with good acting and direction.",
+                "With stunning storytelling, cinematography, and acting, this movie is an emotional masterpiece.",
+                "You will love this movie for its humor, heart, inspiration, and the amazing performances of its actors. It has a great message too.",
+                "The plot and the effects of this movie are amazing. It is full of action, suspense, and humor that will keep you entertained.",
+                "A beautiful and moving drama with a realistic and poignant portrayal of life and superb performances.",
+                "This comedy is a breath of fresh air. The script is witty and clever, and the cast is hilarious."
+                "The world and the characters of this fantasy are complex and rich. It is a captivating and epic movie with amazing visuals.",
+                "A fascinating and insightful documentary with a compelling and important topic and evidence.",
+                "With a spooky and unforeseeable plot and atmosphere, this horror movie will scare and thrill you."]
+    
+    NEGATIVE = ["A boring and dull movie with a weak and cliched plot and characters and poor acting.",
+                "It was a boring and dull movie with a plot and characters that lacked originality and acting that was subpar.",
+                "Wasting the talent of the actors as this crude and unfunny script results in a stupid and offensive movie",
+                "The movie is confusing and disappointing due to a messy and illogical plot and bad visual effects.",
+                "Unlikeable characters and a slow, boring pace make this a depressing watch.",
+                "A cheesy and predictable movie with a lame and unrealistic story and romance and bad dialogue.",
+                "Generic, bland, uninspiring. A copy and paste movie.",
+                "Using cherry-picked data and sources the documentary follows a biased and misleading agenda.",
+                "A corny and sappy movie with a forced and unrealistic romance and melodrama and cliches.",
+                "Just a lame movie due to predictable jump scares and way too much gore.",
+                "The poor and exaggerated portrayal of a historical figure can be seen in this movie.",
+                "The characters are poorly developed, and the plot is predictable."]
+    
+    if args.robustness == 'positive':
+        num_protos_to_replace = int(args.robustness_percentage / 100 * len(np.where(proto_labels[:, 1] == 1)[0]))
+        if num_protos_to_replace > 11:
+            print(f'Only 11 positive reviews available, replacing {num_protos_to_replace} with positive reviews')
+            num_protos_to_replace = 11
+        texts = np.random.choice(POSITIVE, num_protos_to_replace, replace=False)
+        indices = np.random.choice(np.where(proto_labels[:, 1] == 1)[0], num_protos_to_replace, replace=False)
+        for i in range(len(indices)):
+            protos_to_replace.append([texts[i], indices[i], 1])
+    
+    elif args.robustness == 'negative':
+        num_protos_to_replace = int(args.robustness_percentage / 100 * len(np.where(proto_labels[:, 1] == 0)[0]))
+        if num_protos_to_replace > 11:
+            print(f'Only 11 negative reviews available, replacing {num_protos_to_replace} with negative reviews')
+            num_protos_to_replace = 11
+        texts = np.random.choice(NEGATIVE, num_protos_to_replace, replace=False)
+        indices = np.random.choice(np.where(proto_labels[:, 1] == 0)[0], num_protos_to_replace, replace=False)
+        for i in range(len(indices)):
+            protos_to_replace.append([texts[i], indices[i], 0])
+            
+    elif args.robustness == "pos_neg":
+        pos_protos_to_replace = int(args.robustness_percentage / 100 * len(np.where(proto_labels[:, 1] == 1)[0]))
+        neg_proto_to_replace = int(args.robustness_percentage / 100 * len(np.where(proto_labels[:, 1] == 0)[0]))
+        pos_texts = np.random.choice(POSITIVE, pos_protos_to_replace, replace=False)
+        neg_texts = np.random.choice(NEGATIVE, neg_proto_to_replace, replace=False)
+        pos_indices = np.random.choice(np.where(proto_labels[:, 1] == 1)[0], pos_protos_to_replace, replace=False)
+        neg_indices = np.random.choice(np.where(proto_labels[:, 1] == 0)[0], neg_proto_to_replace, replace=False)
+        for i in range(len(pos_indices)):
+            protos_to_replace.append([pos_texts[i], pos_indices[i], 1])
+        for i in range(len(neg_indices)):
+            protos_to_replace.append([neg_texts[i], neg_indices[i], 0])
+            
+    return protos_to_replace
+        
+    
 def soft_rplc_prototypes(args, protos2replace, model, embedding_train, mask_train, text_train, labels_train):
     with torch.no_grad():
         # reassign protolayer, add new ones
@@ -968,6 +1081,27 @@ def transform_explain(args, path):
     
     cols = [f"score_{i} \n" for i in range(1, args.num_prototypes+1)]
     cols = df[cols].idxmax(axis=1)
+    
+    #get index of explanation
+    index = cols.str.replace("score_", "").str.replace(" \n", "")
+    index = [int(i) for i in index.to_list()]
+    print(index)
+    #get two different numbers that are different from index
+    rand1 = []
+    rand2 = []
+    for i in range(len(index)):
+        num1 = np.random.randint(1, args.num_prototypes+1)
+        while num1 == index[i]:
+            num1 = np.random.randint(1, args.num_prototypes+1)
+        
+        num2 = np.random.randint(1, args.num_prototypes+1)
+        while num2 == index[i] or num2 == num1:
+            num2 = np.random.randint(1, args.num_prototypes+1)
+        
+        rand1.append(num1)
+        rand2.append(num2)
+        
+
     expl = cols.str.replace("score", "explanation")
     naming = {}
     for i in range(1, args.num_prototypes+1):
@@ -975,6 +1109,9 @@ def transform_explain(args, path):
     strings = [df.iloc[i, naming[expl.iloc[i]]] for i in range(len(expl))]
     result = df[["test sample \n", "true label \n"]]
     result["expl \n"] = strings
+    
+    randstr1 = [df.iloc[i, naming[f"explanation_{rand1[i]} \n"]] for i in range(len(rand1))]
+    randstr2 = [df.iloc[i, naming[f"explanation_{rand2[i]} \n"]] for i in range(len(rand2))]
     
     dit = {}
     i = 0
@@ -984,24 +1121,30 @@ def transform_explain(args, path):
             i = i + 1
     indices = [dit[sen] for sen in strings]
     result["indices \n"] = indices
-    
-    group_counts = result['indices \n'].value_counts()
-    single_groups = group_counts[group_counts == 1].index.to_list()
-    result = result[~result['indices \n'].isin(single_groups)]
-    
+    result["random expl1 \n"] = randstr1
+    result["random expl2 \n"] = randstr2
     npath = os.path.join(os.path.dirname(path), "explained_modded.csv")
     result.to_csv(npath)
     
-    X = result[['test sample \n', 'expl \n']]
-    y = result['true label \n']
-    groups = result['indices \n']
+    # get least count of any group, if value counts of groups are less than 5, drop them from results
+    groups = result["indices \n"].value_counts().sort_values()
+    least_count = groups[groups > 5].min()
+    result = result[result["indices \n"].isin(groups[groups > 5].index)]
+    
+    
+    
+    # create disproportionate sample from result using least_count
+    survey = result.groupby("indices \n").apply(lambda x: x.sample(least_count)).reset_index(drop=True)
+    # shuffle the rows randomly
+    survey = survey.sample(frac=1).reset_index(drop=True)
+    # add a random explanation column that randomly sampled from survey["expl \n"] and different from survey["expl \n"]
 
-    num_examples = 50
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=num_examples/len(expl), random_state=42, stratify=groups)
-    X_train.to_csv(os.path.join(os.path.dirname(path), "X_train.csv"), index=False)
-    X_test.to_csv(os.path.join(os.path.dirname(path), "X_test.csv"), index=False)
-    y_train.to_csv(os.path.join(os.path.dirname(path), "y_train.csv"), index=False)
-    y_test.to_csv(os.path.join(os.path.dirname(path), "y_test.csv"), index=False)
+   
+    
+
+    survey_path = os.path.join(os.path.dirname(path), "survey.csv")
+    survey.to_csv(survey_path)
+    
 
 
 
