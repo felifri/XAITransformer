@@ -1146,6 +1146,90 @@ def transform_explain(args, path):
     survey.to_csv(survey_path)
     
 
+def create_html_survey(survey_path):
+    import random
+    #set start and end row to read questions from
+    start_row = 0
+    end_row = 17
+
+    #set number of questions to duplicate for quality assurance testing
+    num_duplicates = 2
+    duplicate_indices = sorted(random.sample(range(start_row, end_row), num_duplicates))
+
+    #load dataframe
+    df = pd.read_csv(survey_path)
+    base_path = os.path.dirname(survey_path)
+    
+    #"golden standard" question
+    golden_rule_question = 'What is the color of the sky?'
+    golden_rule_answer = 'blue'
+    golden_rule_explanation = 'The color of the sky is blue.'
+    golden_rule_choices = ['black', 'green']
+
+    # Randomly shuffle the answer choices
+    random.shuffle(golden_rule_choices)
+
+    # Add the correct answer to the list of choices
+    golden_rule_choices.append(golden_rule_answer)
+    
+    # Randomly shuffle the choices again
+    random.shuffle(golden_rule_choices)
+    golden_rule_choices.append('none of the above')
+    # Create the HTML for the "golden rule" question
+    golden_rule_html = f'<div>\n<p>{golden_rule_question}</p>\n'
+    for i, choice in enumerate(golden_rule_choices):
+        golden_rule_html += f'<input type="radio" name="q00_{i}" value="{choice}" id="golden_rule_choice{i+1}" required>\n'
+        golden_rule_html += f'<label for="golden_rule_choice{i+1}">{choice}</label><br>\n'
+    golden_rule_html += f'<p>{golden_rule_explanation}</p>\n</div>\n'
+
+    # Create the HTML for the questions
+    html = golden_rule_html
+    html += '|'
+
+    for index, row in df[start_row:end_row].iterrows():
+        if index in duplicate_indices:
+            for i in range(num_duplicates):
+                # Extract the question, answer, and explanations from the row
+                question = row['test sample \n']
+                answer = row['expl \n']
+                explanations = [row['random expl1 \n'], row['random expl2 \n']]
+                
+                # Randomly shuffle the answer and explanation list
+                choices = explanations[:2] + [answer]
+                random.shuffle(choices)
+                choices.append('none of the above')
+                
+                # Create the HTML for the multiple-choice question with a unique ID
+                html += f'<div>\n<p>{question}</p>\n'
+                for j, choice in enumerate(choices):
+                    html += f'<input type="radio" name="q{index}_{i}" value="{choice}" id="q{index}_{i}_choice{j+1}" required>\n'
+                    html += f'<label for="q{index}_{i}_choice{j+1}">{choice}</label><br>\n'
+                html += '</div>|'
+        else:
+            # Extract the question, answer, and explanations from the row
+            question = row['test sample \n']
+            answer = row['expl \n']
+            explanations = [row['random expl1 \n'], row['random expl2 \n']]
+            
+            # Randomly shuffle the answer and explanation list
+            choices = explanations[:2] + [answer]
+            random.shuffle(choices)
+            choices.append('none of the above')
+            
+            # Create the HTML for the multiple-choice question with a unique ID
+            html += f'<div>\n<p>{question}</p>\n'
+            for j, choice in enumerate(choices):
+                html += f'<input type="radio" name="q{index}" value="{choice}" id="q{index}_choice{j+1}" required>\n'
+                html += f'<label for="q{index}_choice{j+1}">{choice}</label><br>\n'
+            html += '</div>|'
+    
+    #randomly shuffle the questions
+    html_list = html.split('|')
+    random.shuffle(html_list)
+    shuffled_html = '\n\n'.join(html_list)
+    
+    with open(os.path.join(base_path, 'survey.html'), 'w') as f:
+        f.write(shuffled_html)
 
 
 if __name__ == '__main__':
