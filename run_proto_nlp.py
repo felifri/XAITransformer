@@ -17,7 +17,8 @@ from collections import Counter
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
-    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain, robustness
+    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain, robustness, \
+    replace_sentence_prototypes
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
@@ -72,6 +73,10 @@ parser.add_argument('--robustness', type=str, default='facts', choices=['facts',
                     help='type of string replacement to test robustness')
 parser.add_argument('--robustness_percentage', type=int, default=10,
                     help='Percentage of prototypes to be replaced in robustness test (10 = 10%)')
+parser.add_argument('--robustness_epochs', type=int, default=10, 
+                    help='How many epochs should the robustness test run?')
+parser.add_argument('--robustness_reinit', type=bool, default=False,
+                    help='Whether to reinitialize the weights after replacement')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
 parser.add_argument('--compute_emb', type=bool, default=False,
@@ -259,7 +264,8 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
         if os.path.basename(args.model_path).startswith('interacted'):
             fname = 'interacted_' + str(args.num_prototypes) + 'prototypes.txt'
         elif os.path.basename(args.model_path).startswith('robustness'):
-            fname = f"robustness_{args.robustness}_{args.robustness_percentage}.txt"
+            time_stmp_n = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S')
+            fname = f"robustness_{args.robustness}_{args.robustness_percentage}_{args.robustness_reinit}_{args.robustness_epochs}_{time_stmp_n}.txt"
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
 
@@ -539,7 +545,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         protos2replace = robustness(args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled)
         for i in range(len(protos2replace)):
             args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
-                replace_prototypes(args, protos2replace[i], model, embedding_train, mask_train, text_train, labels_train)
+                replace_sentence_prototypes(args, protos2replace[i], model, embedding_train, mask_train, text_train, labels_train)
         
         model.protolayer.requires_grad = False
         
@@ -552,7 +558,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain only retrain last layer (fc)
     if "robustness" in args.mode:
-        args.num_epochs = 10
+        args.num_epochs = args.robustness_epochs
     else:
         args.num_epochs = 100
     args.project = False
@@ -792,7 +798,7 @@ if __name__ == '__main__':
         model = remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
-        model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
+        model_paths = glob.glob(f'./experiments/train_results/*{args.num_prototypes}_{fname}_{args.data_name}_*/*best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
         checkpoint = torch.load(args.model_path)

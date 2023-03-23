@@ -25,8 +25,7 @@ import argparse
 words = set(nltk.corpus.words.words())
 tok = TreebankWordTokenizer()
 detok = TreebankWordDetokenizer()
-parser = argparse.ArgumentParser(description='Utils Transformer Prototype Learning')
-parser.add_argument('--keyword', type=str, default='', help='keyword for specifying the dataset')
+
 
 # __import__("pdb").set_trace()
 
@@ -289,28 +288,6 @@ def robustness(args, model, embedding_train, mask_train, text_train, labels_trai
     protos_to_replace = []
     
     if args.robustness == 'facts':
-        FACTS = ["Animals are multicellular, eukaryotic organisms that belong to the kingdom Animalia.", 
-                "About 15,000-20,000 new animal species are discovered every year.", 
-                "A butterfly has about 12,000 eyes.", 
-                "Tigers have striped skin, not just striped fur."
-                "Jellyfish are made up of 95% water.",
-                "The loudest animal in the world is a 2cm long prawn called Pistol Shrimp.",
-                "Flamingos are not pink; they get their color from their diet of brine shrimp and algae.",
-                "Otters hold hands while sleeping to keep from drifting apart.",
-                "Elephants can recognize themselves in a mirror.",
-                "Sloths can take up to a month to digest a single leaf.",
-                "The blue whale is the largest animal that ever lived.",
-                "The cheetah is the fastest land animal, reaching speeds of up to 120 km/h.",
-                "The great white shark can detect a drop of blood in 25 liters of water.",
-            	"The hummingbird is the only bird that can fly backwards.",
-                "The platypus is one of the few mammals that lay eggs instead of giving birth.",
-                "The octopus has three hearts, nine brains and blue blood.",
-                "The giraffe has a tongue that is about 50 cm long and can clean its ears with it.",
-                "The kangaroo can jump up to 9 meters in a single leap.",
-                "The koala sleeps for up to 22 hours a day.",
-                "The axolotl can regenerate its limbs, tail, heart and even parts of its brain",
-                "Cats have a free-floating collarbone that enables them to fit through tight spaces and land safely after falls."]
-        
         num_protos_to_replace = int(args.robustness_percentage / 100 * args.num_prototypes)
         if num_protos_to_replace > 20:
             print(f'Only 20 facts available, replacing {num_protos_to_replace} with facts')
@@ -329,32 +306,6 @@ def robustness(args, model, embedding_train, mask_train, text_train, labels_trai
             protos_to_replace.append([facts[k], neg_indices[i], 0])
             k = k + 1
         
-    POSITIVE = ["Showing filmmaking, photography, and performance skills, this is a story.",
-                "With a good message and actors, this movie is funny, happy, and positive.",
-                "Action, suspense, comedy, plot, and effects make this movie exciting and fun.",
-                "This drama shows life and its challenges realistically and emotionally, with good acting and direction.",
-                "With stunning storytelling, cinematography, and acting, this movie is an emotional masterpiece.",
-                "You will love this movie for its humor, heart, inspiration, and the amazing performances of its actors. It has a great message too.",
-                "The plot and the effects of this movie are amazing. It is full of action, suspense, and humor that will keep you entertained.",
-                "A beautiful and moving drama with a realistic and poignant portrayal of life and superb performances.",
-                "This comedy is a breath of fresh air. The script is witty and clever, and the cast is hilarious."
-                "The world and the characters of this fantasy are complex and rich. It is a captivating and epic movie with amazing visuals.",
-                "A fascinating and insightful documentary with a compelling and important topic and evidence.",
-                "With a spooky and unforeseeable plot and atmosphere, this horror movie will scare and thrill you."]
-    
-    NEGATIVE = ["A boring and dull movie with a weak and cliched plot and characters and poor acting.",
-                "It was a boring and dull movie with a plot and characters that lacked originality and acting that was subpar.",
-                "Wasting the talent of the actors as this crude and unfunny script results in a stupid and offensive movie",
-                "The movie is confusing and disappointing due to a messy and illogical plot and bad visual effects.",
-                "Unlikeable characters and a slow, boring pace make this a depressing watch.",
-                "A cheesy and predictable movie with a lame and unrealistic story and romance and bad dialogue.",
-                "Generic, bland, uninspiring. A copy and paste movie.",
-                "Using cherry-picked data and sources the documentary follows a biased and misleading agenda.",
-                "A corny and sappy movie with a forced and unrealistic romance and melodrama and cliches.",
-                "Just a lame movie due to predictable jump scares and way too much gore.",
-                "The poor and exaggerated portrayal of a historical figure can be seen in this movie.",
-                "The characters are poorly developed, and the plot is predictable."]
-    
     if args.robustness == 'positive':
         num_protos_to_replace = int(args.robustness_percentage / 100 * len(np.where(proto_labels[:, 1] == 1)[0]))
         if num_protos_to_replace > 11:
@@ -388,6 +339,88 @@ def robustness(args, model, embedding_train, mask_train, text_train, labels_trai
             protos_to_replace.append([neg_texts[i], neg_indices[i], 0])
             
     return protos_to_replace
+
+def replace_sentence_prototypes(args, protos2replace, model, embedding_train, mask_train, text_train, labels_train):
+    with torch.no_grad():
+        # reassign protolayer, add new ones
+        idx = protos2replace[1]
+        args.prototype_class_identity[idx, :] = adjust_cl_ids(args, protos2replace[2])
+        if args.robustness == 'facts':
+            index = FACTS.index(protos2replace[0])
+            path = os.path.join('data/embedding', 'robustness', 'facts')
+            path_e = os.path.join(path, f'fact_{index}.pt')
+            path_m = os.path.join(path, f'fact_{index}_mask.pt')
+            if os.path.isfile(path_e) and os.path.isfile(path_m):
+                protos2replace_e = torch.load(path_e, map_location=torch.device('cpu'))
+                mask_e = torch.load(path_m, map_location=torch.device('cpu'))
+            else:
+                protos2replace_e, mask_e = model.compute_embedding([protos2replace[0]], args, max_l=False) 
+                os.makedirs(path, exist_ok=True, mode=0o777)
+                torch.save(protos2replace_e, path_e)
+                torch.save(mask_e, path_m)
+        elif args.robustness == 'positive':
+            index = POSITIVE.index(protos2replace[0])
+            path = os.path.join('data/embedding', 'robustness', 'positive')
+            path_e = os.path.join(path, f'positive_{index}.pt')
+            path_m = os.path.join(path, f'positive_{index}_mask.pt')
+            if os.path.isfile(path_e) and os.path.isfile(path_m):
+                protos2replace_e = torch.load(path_e, map_location=torch.device('cpu'))
+                mask_e = torch.load(path_m, map_location=torch.device('cpu'))
+            else:
+                protos2replace_e, mask_e = model.compute_embedding([protos2replace[0]], args, max_l=False) 
+                os.makedirs(path, exist_ok=True, mode=0o777)
+                torch.save(protos2replace_e, path_e)
+                torch.save(mask_e, path_m)
+        elif args.robustness == 'negative':
+            index = NEGATIVE.index(protos2replace[0])
+            path = os.path.join('data/embedding', 'robustness', 'negative')
+            path_e = os.path.join(path, f'negative_{index}.pt')
+            path_m = os.path.join(path, f'negative_{index}_mask.pt')
+            if os.path.isfile(path_e) and os.path.isfile(path_m):
+                protos2replace_e = torch.load(path_e, map_location=torch.device('cpu'))
+                mask_e = torch.load(path_m, map_location=torch.device('cpu'))
+            else:
+                protos2replace_e, mask_e = model.compute_embedding([protos2replace[0]], args, max_l=False) 
+                os.makedirs(path, exist_ok=True, mode=0o777)
+                torch.save(protos2replace_e, path_e)
+                torch.save(mask_e, path_m)
+        elif args.robustness == 'pos_neg':
+            index = POSITIVE.index(protos2replace[0]) if protos2replace[2] == 1 else NEGATIVE.index(protos2replace[0])
+            if protos2replace[2] == 1:
+                path = os.path.join('data/embedding', 'robustness', 'positive')
+                path_e = os.path.join(path, f'positive_{index}.pt')
+                path_m = os.path.join(path, f'positive_{index}_mask.pt')
+            else:
+                path = os.path.join('data/embedding', 'robustness', 'negative')
+                path_e = os.path.join(path, f'negative_{index}.pt')
+                path_m = os.path.join(path, f'negative_{index}_mask.pt')
+            if os.path.isfile(path_e) and os.path.isfile(path_m):
+                protos2replace_e = torch.load(path_e, map_location=torch.device('cpu'))
+                mask_e = torch.load(path_m, map_location=torch.device('cpu'))
+            else:
+                protos2replace_e, mask_e = model.compute_embedding([protos2replace[0]], args, max_l=False) 
+                os.makedirs(path, exist_ok=True, mode=0o777)
+                torch.save(protos2replace_e, path_e)
+                torch.save(mask_e, path_m)        
+                
+        protos2replace_e = protos2replace_e.view(1, -1, model.enc_size).to(f'cuda:{args.gpu[0]}')
+        mask_e = mask_e.view(1, -1, model.enc_size)
+
+        model.protolayer[:, idx] = nn.Parameter(protos2replace_e, requires_grad=False)
+        if(args.robustness_reinit):
+            weights = model.fc.weight.detach().clone()
+            weights[:, idx] = nn.init.uniform_(torch.empty(args.num_classes)).to(f'cuda:{args.gpu[0]}')
+            model.fc.weight.copy_(weights)
+        embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = extent_data(args,
+                                                                                                    embedding_train,
+                                                                                                    mask_train,
+                                                                                                    text_train,
+                                                                                                    labels_train,
+                                                                                                    protos2replace_e,
+                                                                                                    mask_e,
+                                                                                                    protos2replace[0],
+                                                                                                    protos2replace[2])
+    return args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled
         
     
 def soft_rplc_prototypes(args, protos2replace, model, embedding_train, mask_train, text_train, labels_train):
@@ -998,82 +1031,145 @@ def load_images(args, image_dir='SMID_images_400px/img'):
 #Functions for automatic evaluation
 def parse_results():
     import glob
-    import shutil
-    import datetime
-    #store all results in a dictionary
-    results = {}
-    #list all subfolders in test_results -> keep the directory clean, move old test runs to archived!
-    subfolders = os.listdir('experiments/train_results')
-
-    for subfolder in subfolders:
-        if 'archived' in subfolder:
-            continue
-        if args.keyword in subfolder:
-            #open normal test run file and parse it
-            results_files = glob.glob(os.path.join('experiments/train_results', subfolder, '*prototypes.txt'))
-            for results_file in results_files:
-                with open(results_file, 'r') as f:
-                    content = f.read()
-                    model, accuracy, mode = parse_content(content)
-                    if model not in results:
-                        results[model] = [accuracy]
-                    else:
-                        results[model].append(accuracy)
-
-            #open interacted test run file and parse it if it exists
-            interacted_files = glob.glob(os.path.join('experiments/train_results', subfolder, 'interacted_*prototypes.txt'))
-            for interacted_file in interacted_files:
-                with open(interacted_file, 'r') as f:
-                    content = f.read()
-                    interacted_model, accuracy, mode = parse_content(content)
-                    #name model with interacted so we can distinguish it from the normal model
-                    interacted_model = 'interacted_' + interacted_model
-                    if interacted_model not in results:
-                        results[interacted_model] = [accuracy]
-                    else:
-                        results[interacted_model].append(accuracy)
-            #move subfolder to archived after parsing
-            shutil.move(os.path.join('experiments/train_results', subfolder), os.path.join('experiments/train_results', 'archived'))
-    for key in results:
-        #append mean and std to results
-        results[key].append(np.mean(results[key]))
-        results[key].append(np.std(results[key]))
-    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S_{args.keyword}_{mode}_')
-    csv_path = os.path.join('experiments/', time_stmp + 'results.csv')
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, 'w', newline='') as csvf:
-        writer = csv.writer(csvf)
-        writer.writerow(['model', 'accuracy1', 'accuracy2', 'accuracy3', 'accuracy4', 'accuracy5', 'mean', 'std'])
-        for key in results:
-            writer.writerow([key, *results[key]])
+    import csv
+    result_dir = "experiments/train_results"
     
+    results_dict = {}
+    
+    for subdir in os.listdir(result_dir):
+        if subdir == "archived":
+            continue
         
-def parse_content(content):
-    """Parses the contents of a test run file and returns the model name and accuracy
+        parts = subdir.split("_")
+        num_prototypes = int(parts[1])
+        model_name = parts[2]
+        dataset = parts[3]
+        similarity = parts[6]
+        
+        # Initialize the dictionary for this dataset if it doesn't exist yet
+        if dataset not in results_dict:
+            results_dict[dataset] = {}
+        
+        # Initialize the dictionary for this model if it doesn't exist yet
+        if model_name not in results_dict[dataset]:
+            results_dict[dataset][model_name] = {}
+        
+        # Initialize the dictionary for this number of prototypes if it doesn't exist yet
+        if num_prototypes not in results_dict[dataset][model_name]:
+            results_dict[dataset][model_name][num_prototypes] = {}
+        
+        
+        results_files = glob.glob(os.path.join('experiments/train_results', subdir, '*prototypes.txt'))
+        for results_file in results_files:
+            with open(results_file, 'r') as f:
+                for line in f:
+                    if line.startswith("num_prototypes"):
+                        practical_prototypes = int(line.split(": ")[1])
+                    if line.startswith("test acc"):
+                        acc = float(line.split(": ")[1])
+        
+        interacted_files = glob.glob(os.path.join('experiments/train_results', subdir, 'interacted_*prototypes.txt'))
+        for interacted_file in interacted_files:
+            with open(interacted_file, 'r') as f:
+                for line in f:
+                    if line.startswith("num_prototypes"):
+                        unique_practical_prototypes = int(line.split(": ")[1])
+                    if line.startswith("test acc"):
+                        unique_acc = float(line.split(": ")[1])
+        
+        if similarity not in results_dict[dataset][model_name][num_prototypes]:
+            results_dict[dataset][model_name][num_prototypes][similarity] = {
+                "practical_prototypes": [practical_prototypes],
+                "acc": [acc],
+                "unique_practical_prototypes": [unique_practical_prototypes],
+                "unique_acc": [unique_acc]
+                }
+        else:
+            results_dict[dataset][model_name][num_prototypes][similarity]["practical_prototypes"].append(practical_prototypes)
+            results_dict[dataset][model_name][num_prototypes][similarity]["acc"].append(acc)
+            results_dict[dataset][model_name][num_prototypes][similarity]["unique_practical_prototypes"].append(unique_practical_prototypes)
+            results_dict[dataset][model_name][num_prototypes][similarity]["unique_acc"].append(unique_acc)
+    
+    for dataset in results_dict:
+        with open(f"experiments/{dataset}_results.csv", 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            writer.writerow(["model", "num_prototypes", "similarity", "practical_prototypes", "acc", "unique_practical_prototypes", "unique_acc"])
+            for model_name in results_dict[dataset]:
+                for num_prototypes in results_dict[dataset][model_name]:
+                    for similarity in results_dict[dataset][model_name][num_prototypes]:
+                        writer.writerow([model_name, num_prototypes, similarity, results_dict[dataset][model_name][num_prototypes][similarity]["practical_prototypes"], results_dict[dataset][model_name][num_prototypes][similarity]["acc"], results_dict[dataset][model_name][num_prototypes][similarity]["unique_practical_prototypes"], results_dict[dataset][model_name][num_prototypes][similarity]["unique_acc"]])
+        
+    with open('experiments/results_dict.pkl', 'wb') as f:
+        pickle.dump(results_dict, f)
+        
+    return results_dict
 
-    Args:
-        content (file.read): the output of f.read() on a test run file
+            
+def compute_averages(results_dict):
+    averages_dict = {}
+    for dataset in results_dict:
+        for model_name in results_dict[dataset]:
+            for num_prototypes in results_dict[dataset][model_name]:
+                for similarity in results_dict[dataset][model_name][num_prototypes]:
+                    # Initialize averages_dict for this combination
+                    if dataset not in averages_dict:
+                        averages_dict[dataset] = {}
+                    if model_name not in averages_dict[dataset]:
+                        averages_dict[dataset][model_name] = {}
+                    if num_prototypes not in averages_dict[dataset][model_name]:
+                        averages_dict[dataset][model_name][num_prototypes] = {}
+                    if similarity not in averages_dict[dataset][model_name][num_prototypes]:
+                        averages_dict[dataset][model_name][num_prototypes][similarity] = {}
 
-    Returns:
-        model: string of model name
-        accuracy: float of accuracy
-    """
-    lines = content.split('\n')
-    for line in lines:
-        if line.startswith('mode:'):
-            mode = line.split(':')[1]
-            mode = mode.strip()
-        elif line.startswith('language_model:'):
-            #only get second part of model line for name
-            model = line.split(':')[1]
-            #remove whitespace
-            model = model.strip()
-        elif line.startswith('test acc:'):
-            accuracy = line.split(':')[1]
-            accuracy = accuracy.strip()
-            accuracy = float(accuracy)
-    return model, accuracy, mode
+                    # Compute averages
+                    results = results_dict[dataset][model_name][num_prototypes][similarity]
+                    avg_practical_prototypes = np.mean(results["practical_prototypes"])
+                    avg_acc = np.mean(results["acc"])
+                    avg_unique_practical_prototypes = np.mean(results["unique_practical_prototypes"])
+                    avg_unique_acc = np.mean(results["unique_acc"])
+                    std_practical_prototypes = np.std(results["practical_prototypes"])
+                    std_acc = np.std(results["acc"])
+                    std_unique_practical_prototypes = np.std(results["unique_practical_prototypes"])
+                    std_unique_acc = np.std(results["unique_acc"])
+                    
+                    # Save averages to averages_dict
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["avg_practical_prototypes"] = avg_practical_prototypes
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["avg_acc"] = avg_acc
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["avg_unique_practical_prototypes"] = avg_unique_practical_prototypes
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["avg_unique_acc"] = avg_unique_acc
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["std_practical_prototypes"] = std_practical_prototypes
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["std_acc"] = std_acc
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["std_unique_practical_prototypes"] = std_unique_practical_prototypes
+                    averages_dict[dataset][model_name][num_prototypes][similarity]["std_unique_acc"] = std_unique_acc
+                    
+                    # Save averages and stds to CSV
+                    # with open(f'experiments/{dataset}_avg_results.csv', 'w', newline='') as csvfile:
+                    #     writer = csv.writer(csvfile, delimiter=',')
+                    #     writer.writerow(["model", "num_protots", "smilarity", "avg_practical_prototypes", "std_practical_prototypes", "avg_acc", "std_acc", "avg_unique_practical_prototypes", "std_unique_practical_prototypes", "avg_unique_acc", "std_unique_acc"])
+                    #     writer.writerow([model_name, num_prototypes, similarity, avg_practical_prototypes, std_practical_prototypes, avg_acc, std_acc, avg_unique_practical_prototypes, std_unique_practical_prototypes, avg_unique_acc, std_unique_acc])
+                    
+    return averages_dict
 
+def write_averages_to_csv(averages_dict):
+    for dataset in averages_dict:
+        with open(f"experiments/{dataset}_results.csv", 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            for model_name in averages_dict[dataset]:
+                for num_prototypes in averages_dict[dataset][model_name]:
+                    for similarity in averages_dict[dataset][model_name][num_prototypes]:
+                        row = [model_name, num_prototypes, similarity]
+                        results = averages_dict[dataset][model_name][num_prototypes][similarity]
+                        row.extend([
+                            results["avg_practical_prototypes"], 
+                            results["avg_acc"], 
+                            results["avg_unique_practical_prototypes"], 
+                            results["avg_unique_acc"],
+                            results["std_practical_prototypes"], 
+                            results["std_acc"], 
+                            results["std_unique_practical_prototypes"], 
+                            results["std_unique_acc"]
+                        ])
+                        writer.writerow(row)
 
 def transform_explain(args, path):
     df = pd.read_csv(path)
@@ -1176,10 +1272,10 @@ def create_html_survey(survey_path):
     random.shuffle(golden_rule_choices)
     golden_rule_choices.append('none of the above')
     # Create the HTML for the "golden rule" question
-    golden_rule_html = f'<div>\n<p>{golden_rule_question}</p>\n'
+    golden_rule_html = f'<div>\n<p>Question: {golden_rule_question}</p>\n'
     for i, choice in enumerate(golden_rule_choices):
-        golden_rule_html += f'<input type="radio" name="q00_{i}" value="{choice}" id="golden_rule_choice{i+1}" required>\n'
-        golden_rule_html += f'<label for="golden_rule_choice{i+1}">{choice}</label><br>\n'
+        golden_rule_html += f'<input type="radio" name="q00_{i}" value="{choice}" id="q00_{i}_choice{i+1}" required>\n'
+        golden_rule_html += f'<label for="q00_{i}_choice{i+1}">{choice}</label><br>\n'
     golden_rule_html += f'<p>{golden_rule_explanation}</p>\n</div>\n'
 
     # Create the HTML for the questions
@@ -1200,7 +1296,7 @@ def create_html_survey(survey_path):
                 choices.append('none of the above')
                 
                 # Create the HTML for the multiple-choice question with a unique ID
-                html += f'<div>\n<p>{question}</p>\n'
+                html += f'<div>\n<p>Question: {question}</p>\n'
                 for j, choice in enumerate(choices):
                     html += f'<input type="radio" name="q{index}_{i}" value="{choice}" id="q{index}_{i}_choice{j+1}" required>\n'
                     html += f'<label for="q{index}_{i}_choice{j+1}">{choice}</label><br>\n'
@@ -1217,7 +1313,7 @@ def create_html_survey(survey_path):
             choices.append('none of the above')
             
             # Create the HTML for the multiple-choice question with a unique ID
-            html += f'<div>\n<p>{question}</p>\n'
+            html += f'<div>\n<p>Question: {question}</p>\n'
             for j, choice in enumerate(choices):
                 html += f'<input type="radio" name="q{index}" value="{choice}" id="q{index}_choice{j+1}" required>\n'
                 html += f'<label for="q{index}_choice{j+1}">{choice}</label><br>\n'
@@ -1231,7 +1327,112 @@ def create_html_survey(survey_path):
     with open(os.path.join(base_path, 'survey.html'), 'w') as f:
         f.write(shuffled_html)
 
+def parse_robustness(path):
+    import glob
+    pattern = path + "/robustness_*_*.txt"
+    file_list = glob.glob(pattern)
+    
+    df_list = []
+    for file_name in file_list:
+        with open(file_name, 'r') as f:
+            for line in f:
+                if line.startswith('test acc:'):
+                    acc = float(line.split(': ')[-1])
+        df = pd.DataFrame()
+        if 'pos_neg' in file_name:
+            df["type"] = ["pos_neg"]
+            df["percentage"] = [file_name.split('/')[-1].split('_')[3]]
+            df["reinit"] = [file_name.split('/')[-1].split('_')[4]]
+            df["epochs"] = [file_name.split('/')[-1].split('_')[5]]
+        else:
+            df["type"] = [file_name.split('/')[-1].split('_')[1]]
+            df["percentage"] = [file_name.split('/')[-1].split('_')[2]]
+            df["reinit"] = [file_name.split('/')[-1].split('_')[3]]
+            df["epochs"] = [file_name.split('/')[-1].split('_')[4]]
+        df["accuracy"] = [acc]
+        df_list.append(df)
+    df = pd.concat(df_list)
+    df.to_csv(path + "/robustness.csv", index=False)
+    
+    for type in df["type"].unique():
+        df_type = df[df["type"] == type]
+        df_type.to_csv(path + f"/robustness_{type}.csv", index=False)
+
+    return df
+
+def plot_robustness(path):
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    df = pd.read_csv(path)
+    palette = sns.color_palette("husl", n_colors=3)
+    sns.set_style("whitegrid")
+    sns.set_palette(palette)
+    type = df["type"].unique()[0]
+    
+    grouped = df.groupby(["reinit", "epochs"])
+    for i, (name, group) in enumerate(grouped):
+        reinit = name[0]
+        epochs = name[1]
+        label = f"{reinit}, {epochs}"
+        sns.lineplot(x="percentage", y="accuracy", data=group, label=label, color=palette[i])
+    plt.title(f"{type.capitalize()} Replacement")
+    plt.xlabel("Percentage of Replacements")
+    plt.ylabel("Accuracy")
+    plt.legend(title="Reinit, Epochs")
+    basedir = os.path.dirname(path)
+    plt.savefig(basedir + f"/robustness_{type}.png")
+
+
+POSITIVE = ["Showing filmmaking, photography, and performance skills, this is a story.",
+            "With a good message and actors, this movie is funny, happy, and positive.",
+            "Action, suspense, comedy, plot, and effects make this movie exciting and fun.",
+            "This drama shows life and its challenges realistically and emotionally, with good acting and direction.",
+            "With stunning storytelling, cinematography, and acting, this movie is an emotional masterpiece.",
+            "You will love this movie for its humor, heart, inspiration, and the amazing performances of its actors. It has a great message too.",
+            "The plot and the effects of this movie are amazing. It is full of action, suspense, and humor that will keep you entertained.",
+            "A beautiful and moving drama with a realistic and poignant portrayal of life and superb performances.",
+            "This comedy is a breath of fresh air. The script is witty and clever, and the cast is hilarious."
+            "The world and the characters of this fantasy are complex and rich. It is a captivating and epic movie with amazing visuals.",
+            "A fascinating and insightful documentary with a compelling and important topic and evidence.",
+            "With a spooky and unforeseeable plot and atmosphere, this horror movie will scare and thrill you."]
+
+NEGATIVE = ["A boring and dull movie with a weak and cliched plot and characters and poor acting.",
+            "It was a boring and dull movie with a plot and characters that lacked originality and acting that was subpar.",
+            "Wasting the talent of the actors as this crude and unfunny script results in a stupid and offensive movie",
+            "The movie is confusing and disappointing due to a messy and illogical plot and bad visual effects.",
+            "Unlikeable characters and a slow, boring pace make this a depressing watch.",
+            "A cheesy and predictable movie with a lame and unrealistic story and romance and bad dialogue.",
+            "Generic, bland, uninspiring. A copy and paste movie.",
+            "Using cherry-picked data and sources the documentary follows a biased and misleading agenda.",
+            "A corny and sappy movie with a forced and unrealistic romance and melodrama and cliches.",
+            "Just a lame movie due to predictable jump scares and way too much gore.",
+            "The poor and exaggerated portrayal of a historical figure can be seen in this movie.",
+            "The characters are poorly developed, and the plot is predictable."]
+
+FACTS = ["Animals are multicellular, eukaryotic organisms that belong to the kingdom Animalia.", 
+                "About 15,000-20,000 new animal species are discovered every year.", 
+                "A butterfly has about 12,000 eyes.", 
+                "Tigers have striped skin, not just striped fur."
+                "Jellyfish are made up of 95% water.",
+                "The loudest animal in the world is a 2cm long prawn called Pistol Shrimp.",
+                "Flamingos are not pink; they get their color from their diet of brine shrimp and algae.",
+                "Otters hold hands while sleeping to keep from drifting apart.",
+                "Elephants can recognize themselves in a mirror.",
+                "Sloths can take up to a month to digest a single leaf.",
+                "The blue whale is the largest animal that ever lived.",
+                "The cheetah is the fastest land animal, reaching speeds of up to 120 km/h.",
+                "The great white shark can detect a drop of blood in 25 liters of water.",
+            	"The hummingbird is the only bird that can fly backwards.",
+                "The platypus is one of the few mammals that lay eggs instead of giving birth.",
+                "The octopus has three hearts, nine brains and blue blood.",
+                "The giraffe has a tongue that is about 50 cm long and can clean its ears with it.",
+                "The kangaroo can jump up to 9 meters in a single leap.",
+                "The koala sleeps for up to 22 hours a day.",
+                "The axolotl can regenerate its limbs, tail, heart and even parts of its brain",
+                "Cats have a free-floating collarbone that enables them to fit through tight spaces and land safely after falls."]
 
 if __name__ == '__main__':
-    args = parser.parse_args()
-    parse_results()
+    result_dict = parse_results()
+    averages_dict = compute_averages(result_dict)
+    write_averages_to_csv(averages_dict)
