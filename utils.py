@@ -1358,7 +1358,11 @@ def parse_robustness(path):
         df_type = df[df["type"] == type]
         df_type.to_csv(path + f"/robustness_{type}.csv", index=False)
 
+        grouped_df = df_type.groupby(['reinit', 'epochs', 'percentage']).mean().reset_index()
+        grouped_df.to_csv(path + f"/robustness_{type}_average.csv", index=False)
+
     return df
+
 
 def plot_robustness(path):
     import seaborn as sns
