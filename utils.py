@@ -1340,7 +1340,7 @@ def parse_robustness(path):
                     acc = float(line.split(': ')[-1])
         df = pd.DataFrame()
         if 'pos_neg' in file_name:
-            df["type"] = ["pos_neg"]
+            df["type"] = ["Dual-Polarity"]
             df["percentage"] = [file_name.split('/')[-1].split('_')[3]]
             df["reinit"] = [file_name.split('/')[-1].split('_')[4]]
             df["epochs"] = [file_name.split('/')[-1].split('_')[5]]
@@ -1373,6 +1373,8 @@ def plot_robustness(path):
     sns.set_style("whitegrid")
     sns.set_palette(palette)
     type = df["type"].unique()[0]
+    if type == "pos_neg":
+        type = "Dual-Polarity"
     
     grouped = df.groupby(["reinit", "epochs"])
     for i, (name, group) in enumerate(grouped):
