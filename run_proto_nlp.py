@@ -23,7 +23,7 @@ from utils import save_embedding, load_embedding, load_data, visualize_protos, p
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain, unique, survey, robustness')
+                         'prune, add, remove, reinitialize, explain, unique, survey, robustness.')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -50,8 +50,6 @@ parser.add_argument('-l4', '--lambda4', default=0.3, type=float,
                     help='Weight for prototype diversity loss')
 parser.add_argument('-l5', '--lambda5', default=1e-3, type=float,
                     help='Weight for l1 weight regularization loss')
-parser.add_argument('-l6', '--lambda6', default=1, type=float,
-                    help='Weight for class loss')
 parser.add_argument('--num_classes', default=2, type=int,
                     help='How many classes are to be classified?')
 parser.add_argument('-g', '--gpu', type=int, default=[0], nargs='+',
@@ -83,7 +81,7 @@ parser.add_argument('--compute_emb', type=bool, default=False,
                     help='Whether to recompute (True) the embedding or just load it (False)')
 parser.add_argument('--query', type=str, default=['I do not like the food here'], nargs='+',
                     help='Type your query to test the model and get classification explanation')
-parser.add_argument('--metric', type=str, default='L2', choices=['cosine', 'L2'],
+parser.add_argument('--metric', type=str, default='cosine', choices=['cosine', 'L2'],
                     help='What metric should be used to compute the distance/ similarity?')
 parser.add_argument('--attn', type=str, default=False,
                     help='Whether to use self-attention on the word embeddings before distance computation')
@@ -146,7 +144,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             optimizer.step()
             with torch.no_grad():
                 model.fc.weight.copy_(model.fc.weight.clamp(max=0.0))
-            
+
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -215,7 +213,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
                 best_acc = 0
                 model, args = project(args, embedding_train, model, train_batches_unshuffled, text_train, labels_train)
                 model.protolayer.requires_grad = False
-    
+
     model.load_state_dict(state['state_dict'])
     torch.save(state, args.model_path)
     return model
@@ -335,6 +333,7 @@ def query(args, train_batches_unshuffled, labels_train, text_train, model):
             f'score: {float(similarity[i]):.3f} * {weight[i]:.3f} = {float(similarity[i] * weight[i]):.3f}\n')
     txt_file.write(f'\nwith:\nsimilarity * weight = score')
     txt_file.close()
+
 
 def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model):
     '''
@@ -477,7 +476,7 @@ def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, 
         csv_path = os.path.join(os.path.dirname(args.model_path), 'steerable_survey.csv')
         with open(csv_path, 'w') as f:
             csv_df.to_csv(f, index=False)
-            
+
 
 def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches,
              labels_train, text_train, model):
@@ -506,7 +505,6 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         model.protolayer.requires_grad = False
 
     if 'unique' in args.mode:
-        
         # load information about all prototypes
         proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
         # sample duplicates in dictionary
@@ -524,7 +522,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
             median_tensor = torch.median(stacked_tensors, dim=0)[0]
             similarites = [F.cosine_similarity(median_tensor, x) for x in selected_tensors]
             closest_index = similarites.index(max(similarites))
-            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index]]) #and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
+            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index] and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
         # remove duplicates from model
         args, model = remove_prototypes(args, prots_to_remove, model, use_cos=False, use_weight=False)
 
@@ -548,9 +546,8 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
                 replace_sentence_prototypes(args, protos2replace[i], model, embedding_train, mask_train, text_train, labels_train)
         
         model.protolayer.requires_grad = False
+    
         
-        
-
     # save changed model
     if "robustness" in args.mode:
         args.model_path = os.path.join(os.path.dirname(args.model_path), f'robustness_{args.robustness}_{args.robustness_percentage}.pth.tar')
@@ -569,7 +566,7 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
 
 
 def explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
-            labels_train, embedding_val, mask_val, text_val, labels_val):
+            labels_train):
     print('\nExplain each test sample, loading model:', args.model_path)
     model.eval()
 
@@ -610,7 +607,7 @@ def explain(args, embedding_test, mask_test, text_test, labels_test, model, trai
                 values.append(f'{float(-weights[idx, predicted]):.3f}\n')
                 values.append(f'{float(top_scores[j]):.3f}\n')
             explained_test_samples.append(values)
-        
+
         for i in range(len(labels_val)):
             emb = embedding_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
             mask = mask_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
@@ -637,7 +634,7 @@ def explain(args, embedding_test, mask_test, text_test, labels_test, model, trai
     with open(save_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerows(explained_test_samples)
-        
+
     transform_explain(args, save_path)
 
 
@@ -710,8 +707,7 @@ def remove_false(args, train_batches, val_batches, model, embedding_train, train
     args.num_prototypes = model.num_prototypes
     
     return model
-  
-    
+
 
 if __name__ == '__main__':
     # torch.manual_seed(0)
@@ -733,7 +729,7 @@ if __name__ == '__main__':
 
     if args.num_prototypes % args.num_classes:
         print('number of prototypes should be divisible by number of classes')
-    #    args.num_prototypes -= args.num_prototypes % args.num_classes
+        # args.num_prototypes -= args.num_prototypes % args.num_classes
     # define which prototype belongs to which class (onehot encoded matrix)
     args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes // args.num_classes, 1
                                                                        ).to(f'cuda:{args.gpu[0]}')
@@ -798,7 +794,7 @@ if __name__ == '__main__':
         model = remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train)
     if not os.path.exists(args.model_path):
         #load latest model path with given amount of prototypes if it exists
-        model_paths = glob.glob(f'./experiments/train_results/*{args.num_prototypes}_{fname}_{args.data_name}_*/*best_model.pth.tar')
+        model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
         checkpoint = torch.load(args.model_path)
@@ -811,9 +807,8 @@ if __name__ == '__main__':
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model)
     if 'explain' in args.mode:
         explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
-                labels_train, embedding_val, mask_val, text_val, labels_val)
+                labels_train)
     if 'faithful' in args.mode:
         faithful(args, embedding_test, mask_test, text_test, labels_test, model)
     if 'survey' in args.mode:
         survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model)
-        
