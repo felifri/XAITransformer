@@ -8,6 +8,7 @@ To setup the model, we need to first:
 * download https://www.yelp.com/dataset to `data/restaurant/`
 * download https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge/data to `data/jigsaw/`
 * set up a (python) virtual environment meeting [requirements.txt](requirements.txt)
+* to run SGPT models, please update the sentence-transformer package using the following repository: https://github.com/Muennighoff/sgpt
 
 The core file is [run_proto_nlp.py](run_proto_nlp.py)
 

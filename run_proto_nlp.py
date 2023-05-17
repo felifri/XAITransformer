@@ -4,24 +4,26 @@ import glob
 import os
 import random
 from rtpt import RTPT
-
+import torch.nn.functional as F
 import torch
 import numpy as np
+import pandas as pd
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 # from transformers import get_linear_schedule_with_warmup
 from PIL import Image
-
+from collections import Counter
 from models import ProtoTrexS, ProtoTrexW
 from utils import save_embedding, load_embedding, load_data, visualize_protos, proto_loss, prune_prototypes, \
     get_nearest, remove_prototypes, add_prototypes, reinit_prototypes, finetune_prototypes, nearest_image, \
-    replace_prototypes, soft_rplc_prototypes, project
+    replace_prototypes, soft_rplc_prototypes, project, preprocess_restaurant, preprocess_jigsaw, transform_explain, robustness, \
+    replace_sentence_prototypes
 
 parser = argparse.ArgumentParser(description='Transformer Prototype Learning')
 parser.add_argument('-m', '--mode', default='train test', type=str, nargs='+',
                     help='What do you want to do? Select either any combination of train, test, query, finetune, '
-                         'prune, add, remove, reinitialize, explain.')
+                         'prune, add, remove, reinitialize, explain, unique, survey, robustness.')
 parser.add_argument('--lr', type=float, default=0.004,
                     help='Select learning rate')
 parser.add_argument('-e', '--num_epochs', default=200, type=int,
@@ -34,7 +36,7 @@ parser.add_argument('--data_dir', default='./data',
                     help='Select data path')
 parser.add_argument('--data_name', default='rt-polarity', type=str, choices=['rt-polarity', 'toxicity', 'jigsaw',
                                                                              'toxicity_full', 'ethics', 'restaurant',
-                                                                             'movie_review'],
+                                                                             'movie_review', 'propaganda'],
                     help='Select name of data set')
 parser.add_argument('--num_prototypes', default=10, type=int,
                     help='Total number of prototypes')
@@ -42,7 +44,7 @@ parser.add_argument('-l1', '--lambda1', default=0.2, type=float,
                     help='Weight for prototype distribution loss')
 parser.add_argument('-l2', '--lambda2', default=0.2, type=float,
                     help='Weight for prototype cluster loss')
-parser.add_argument('-l3', '--lambda3', default=0.1, type=float,
+parser.add_argument('-l3', '--lambda3', default=0.2, type=float,
                     help='Weight for prototype separation loss')
 parser.add_argument('-l4', '--lambda4', default=0.3, type=float,
                     help='Weight for prototype diversity loss')
@@ -63,8 +65,16 @@ parser.add_argument('--proto_size', type=int, default=1,
 parser.add_argument('--level', type=str, default='word', choices=['word', 'sentence'],
                     help='Define whether prototypes are computed on word (Bert/GPT2) or sentence level (SentBert/CLS)')
 parser.add_argument('--language_model', type=str, default='Bert', choices=['Bert', 'SentBert', 'GPT2', 'GPTJ', 'TXL',
-                                                                           'Roberta', 'DistilBert', 'Clip'],
+                                                                           'Roberta', 'DistilBert', 'Clip', 'Sentence-T5', 'all-mpnet', 'SGPT-5.8', 'SGPT-125', 'SGPT-7.1'],
                     help='Define which language model to use')
+parser.add_argument('--robustness', type=str, default='facts', choices=['facts', 'positive', 'negative', 'pos_neg'],
+                    help='type of string replacement to test robustness')
+parser.add_argument('--robustness_percentage', type=int, default=10,
+                    help='Percentage of prototypes to be replaced in robustness test (10 = 10%)')
+parser.add_argument('--robustness_epochs', type=int, default=10, 
+                    help='How many epochs should the robustness test run?')
+parser.add_argument('--robustness_reinit', type=bool, default=False,
+                    help='Whether to reinitialize the weights after replacement')
 parser.add_argument('-d', '--dilated', type=int, default=[1], nargs='+',
                     help='Whether to use dilation in the ProtoP convolution and which step size')
 parser.add_argument('--compute_emb', type=bool, default=False,
@@ -81,6 +91,7 @@ parser.add_argument('--soft', type=str, default=False, nargs='+',
                     help='Whether to softly apply loss')
 parser.add_argument('--pid', type=str, default='',
                     help='Name for process')
+
 
 
 def train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train):
@@ -133,6 +144,7 @@ def train(args, train_batches, val_batches, model, embedding_train, train_batche
             optimizer.step()
             with torch.no_grad():
                 model.fc.weight.copy_(model.fc.weight.clamp(max=0.0))
+
             # store losses
             losses_per_batch.append(float(loss))
             ce_loss_per_batch.append(float(ce_loss))
@@ -249,11 +261,14 @@ def test(args, embedding_train, mask_train, train_batches_unshuffled, test_batch
 
         if os.path.basename(args.model_path).startswith('interacted'):
             fname = 'interacted_' + str(args.num_prototypes) + 'prototypes.txt'
+        elif os.path.basename(args.model_path).startswith('robustness'):
+            time_stmp_n = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S')
+            fname = f"robustness_{args.robustness}_{args.robustness_percentage}_{args.robustness_reinit}_{args.robustness_epochs}_{time_stmp_n}.txt"
         else:
             fname = str(args.num_prototypes) + 'prototypes.txt'
 
-        if args.language_model == 'Clip':
-            nearest_image(args, model, proto_texts)
+        # if args.language_model == 'Clip':
+        #     nearest_image(args, model, proto_texts)
 
         proto_texts = [id_ + txt for id_, txt in zip(proto_info, proto_texts)]
         save_path = os.path.join(os.path.dirname(args.model_path), fname)
@@ -320,6 +335,149 @@ def query(args, train_batches_unshuffled, labels_train, text_train, model):
     txt_file.close()
 
 
+def survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model):
+    '''
+    Function samples 100 datapoints from the test set and creates 4(8) different csv files.
+    Each file contains a random permutation of the 100 datapoints then they differ:
+    1st csv contains only the datapoints
+    2nd csv contains datapoints with random explanations picked from the prototypes of the model
+    3rd csv contains datapoints with the best explanation given by inference
+    4th csv contains datapoints with the best explanation as well as the prediction of the model
+    
+    For each of the csvs there is a corresponding csv with the true labels of the datapoints.
+    '''
+    mode = "Steerable" #set which type of survey you want to create
+    print('\nCreating Survey, loading model:', args.model_path)
+    model.eval()
+    _, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    if mode == "ProtoTex":
+        rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex-Survey', max_iterations=100)
+        rtpt.start()
+        # load 100 random examples from test set and their corresponding labels
+        zipped_elements = list(zip(text_test, labels_test))
+        random_elements = random.sample(zipped_elements, 100)
+        random_texts, random_labels = zip(*random_elements)
+        # create a dictionary that will keep track of all necessary values
+        dictionary = {}
+        dictionary['Input'] = random_texts
+        dictionary['True Label'] = random_labels
+        
+        # iterate over each entry in the dictionary and add the predicted labels as well as the explanations to the dictionary
+        for text in random_texts:
+            rtpt.step()
+            args.query = text
+            embedding_query, mask_query = model.compute_embedding(args.query, args)
+            embedding_query = embedding_query.to(f'cuda:{args.gpu[0]}')
+            mask_query = mask_query.to(f'cuda:{args.gpu[0]}')
+            args.query = args.query[0]
+            torch.cuda.empty_cache() # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+        
+            prototype_distances, predicted_label = model.forward(embedding_query, mask_query)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            query2proto = torch.topk(prototype_distances.cpu().detach().squeeze(), k=1, largest=False)
+            nearest_proto = proto_texts[query2proto[1]]
+        
+            #add prediction to dictionary
+            if "prediction" not in dictionary:
+                dictionary["prediction"] = [int(predicted)]
+            else:
+                dictionary["prediction"].append(int(predicted))
+            #add explanation to dictionary
+            if "explanation" not in dictionary:
+                dictionary["explanation"] = [nearest_proto]
+            else:
+                dictionary["explanation"].append(nearest_proto)
+            #add random explanation to dictionary
+            if "random explanation" not in dictionary:
+                dictionary["random explanation"] = [random.choice(proto_texts)]
+            else:
+                dictionary["random explanation"].append(random.choice(proto_texts))
+                
+        # create a dataframe from the dictionary
+        csv_df4 = pd.DataFrame(dictionary)
+        csv_path4 = os.path.join(os.path.dirname(args.model_path), 'survey4.csv')
+        with open(csv_path4, 'w') as f:
+            csv_df4.to_csv(f, index=False)
+        # create a dataframe with only the input and randomize the order of the rows
+        csv_df1 = csv_df4.drop(columns=['prediction', 'explanation', 'random explanation'])
+        csv_df1 = csv_df1.sample(frac=1).reset_index(drop=True)
+        csv_path1 = os.path.join(os.path.dirname(args.model_path), 'survey1.csv')
+        with open(csv_path1, 'w') as f:
+            csv_df1.to_csv(f, index=False)
+        # create a dataframe with only the input and the random explanation and randomize the order of the rows
+        csv_df2 = csv_df4.drop(columns=['prediction', 'explanation'])
+        csv_df2 = csv_df2.sample(frac=1).reset_index(drop=True)
+        csv_path2 = os.path.join(os.path.dirname(args.model_path), 'survey2.csv')
+        with open(csv_path2, 'w') as f:
+            csv_df2.to_csv(f, index=False)
+        # create a dataframe with only the input and the explanation and randomize the order of the rows
+        csv_df3 = csv_df4.drop(columns=['prediction', 'random explanation'])
+        csv_df3 = csv_df3.sample(frac=1).reset_index(drop=True)
+        csv_path3 = os.path.join(os.path.dirname(args.model_path), 'survey3.csv')
+        with open(csv_path3, 'w') as f:
+            csv_df3.to_csv(f, index=False)
+    elif mode == "Steerable":
+        rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex-Survey', max_iterations=100)
+        rtpt.start()
+        # load 100 random examples from test set and their corresponding labels
+        zipped_elements = list(zip(text_test, labels_test))
+        random_elements = random.sample(zipped_elements, 100)
+        random_texts, random_labels = zip(*random_elements)
+        # create a dictionary that will keep track of all necessary values
+        dictionary = {}
+        dictionary['Input'] = random_texts
+        dictionary['True Label'] = random_labels
+        for text in random_texts:
+            rtpt.step()
+            args.query = text
+            embedding_query, mask_query = model.compute_embedding(args.query, args)
+            embedding_query = embedding_query.to(f'cuda:{args.gpu[0]}')
+            mask_query = mask_query.to(f'cuda:{args.gpu[0]}')
+            args.query = args.query[0]
+            #torch.cuda.empty_cache()  # is required since BERT encoding is only possible on 1 GPU (memory limitation)
+
+            # "convert" prototype embedding to text (take text of nearest training sample)
+            _, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+            prototype_distances, predicted_label = model.forward(embedding_query, mask_query)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            k = 5 #args.num_prototypes
+            query2proto = torch.topk(prototype_distances.cpu().detach().squeeze(), k=k, largest=False)
+            weights = model.get_proto_weights()
+            weight = - weights[query2proto[1], predicted]
+            similarity = - query2proto[0]
+            scores = []
+            #print(len(weight), len(similarity))
+            for i in range(k):
+                scores.append(float(weight[i] * similarity[i]))
+            sorted_scores = sorted(scores, reverse=True)
+            index_scores = list(zip(range(len(scores)),sorted_scores))
+            
+            if "prediction" not in dictionary:
+                dictionary["prediction"] = [int(predicted)]
+            else:
+                dictionary["prediction"].append(int(predicted))
+            #add explanation to dictionary
+            for i in range(3):
+                index, score = index_scores[i]
+                nearest_proto = proto_texts[query2proto[1][index]]
+                if f"explanation {i}" not in dictionary:
+                    dictionary[f"explanation {i}"] = [nearest_proto]
+                    dictionary[f"score {i}"] = [f"sim {float(similarity[index]):.3f} * weight {float(weight[index]):.3f} = {float(score):.3f}"]
+                else:
+                    dictionary[f"explanation {i}"].append(nearest_proto)
+                    dictionary[f"score {i}"].append(f"sim {float(similarity[index]):.3f} * weight {float(weight[index]):.3f} = {float(score):.3f}")
+            #add random explanation to dictionary
+            for i in range(2):
+                if f"random explanation {i}" not in dictionary:
+                    dictionary[f"random explanation {i}"] = [random.choice(proto_texts)]
+                else:
+                    dictionary[f"random explanation {i}"].append(random.choice(proto_texts))
+        csv_df = pd.DataFrame(dictionary)
+        csv_path = os.path.join(os.path.dirname(args.model_path), 'steerable_survey.csv')
+        with open(csv_path, 'w') as f:
+            csv_df.to_csv(f, index=False)
+
+
 def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches,
              labels_train, text_train, model):
     print('\nInteract, loading model:', args.model_path)
@@ -346,6 +504,28 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
 
         model.protolayer.requires_grad = False
 
+    if 'unique' in args.mode:
+        # load information about all prototypes
+        proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+        # sample duplicates in dictionary
+        index = {}
+        prots_to_remove = []
+        for i, x in enumerate(proto_texts):
+            if x not in index:
+                index[x] = [i]
+            else:
+                index[x].append(i)
+        # find median prototype for each duplicate and remove all but the closest one, if similarity is high enough
+        for index_list_names, index_list in index.items():
+            selected_tensors = [model.protolayer[:, i] for i in index_list]
+            stacked_tensors = torch.stack(selected_tensors, dim=0)
+            median_tensor = torch.median(stacked_tensors, dim=0)[0]
+            similarites = [F.cosine_similarity(median_tensor, x) for x in selected_tensors]
+            closest_index = similarites.index(max(similarites))
+            prots_to_remove.extend([i for i in index_list if i != index_list[closest_index] and F.cosine_similarity(median_tensor, model.protolayer[:, i]) > 0.9])
+        # remove duplicates from model
+        args, model = remove_prototypes(args, prots_to_remove, model, use_cos=False, use_weight=False)
+
     if 'reinitialize' in args.mode:
         protos2reinit = [0]
         model = reinit_prototypes(args, protos2reinit, model)
@@ -359,10 +539,25 @@ def interact(args, train_batches, mask_train, train_batches_unshuffled, val_batc
         args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
             prune_prototypes(args, protos2prune, model, embedding_train, mask_train, text_train, labels_train)
 
+    if 'robustness' in args.mode:
+        protos2replace = robustness(args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled)
+        for i in range(len(protos2replace)):
+            args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
+                replace_sentence_prototypes(args, protos2replace[i], model, embedding_train, mask_train, text_train, labels_train)
+        
+        model.protolayer.requires_grad = False
+    
+        
     # save changed model
-    args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
+    if "robustness" in args.mode:
+        args.model_path = os.path.join(os.path.dirname(args.model_path), f'robustness_{args.robustness}_{args.robustness_percentage}.pth.tar')
+    else:
+        args.model_path = os.path.join(os.path.dirname(args.model_path), 'interacted_best_model.pth.tar')
     # retrain only retrain last layer (fc)
-    args.num_epochs = 100
+    if "robustness" in args.mode:
+        args.num_epochs = args.robustness_epochs
+    else:
+        args.num_epochs = 100
     args.project = False
     model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                   labels_train)
@@ -413,15 +608,37 @@ def explain(args, embedding_test, mask_test, text_test, labels_test, model, trai
                 values.append(f'{float(top_scores[j]):.3f}\n')
             explained_test_samples.append(values)
 
+        for i in range(len(labels_val)):
+            emb = embedding_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
+            mask = mask_val[i].to(f'cuda:{args.gpu[0]}').unsqueeze(0)
+            prototype_distances, predicted_label = model.forward(emb, mask)
+            predicted = torch.argmax(predicted_label).cpu().detach()
+            probability = torch.nn.functional.softmax(predicted_label, dim=1).squeeze().tolist()
+            similarity_score = prototype_distances.cpu().detach().squeeze() * weights[:, predicted]
+            top_scores = similarity_score
+
+            values = [''.join(text_val[i]) + '\n', f'{int(labels_val[i])}\n', f'{int(predicted)}\n',
+                      f'{probability[0]:.3f}\n', f'{probability[1]:.3f}\n']
+            for j in range(args.num_prototypes):
+                idx = j
+                nearest_proto = proto_texts[idx]
+                values.append(f'{nearest_proto}\n')
+                values.append(f'{idx + 1}\n')
+                values.append(f'{float(-prototype_distances[:, idx]):.3f}\n')
+                values.append(f'{float(-weights[idx, predicted]):.3f}\n')
+                values.append(f'{float(top_scores[j]):.3f}\n')
+            explained_test_samples.append(values)
+
     import csv
     save_path = os.path.join(os.path.dirname(args.model_path), 'explained' + args.pid + '.csv')
     with open(save_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerows(explained_test_samples)
 
+    transform_explain(args, save_path)
+
 
 def faithful(args, embedding_test, mask_test, text_test, labels_test, model, k=1):
-    import pandas as pd
     data_explained = pd.read_csv(os.path.join(os.path.dirname(args.model_path), 'explained_normal.csv'))
 
     score = ['score_1 \n', 'score_2 \n', 'score_3 \n', 'score_4 \n', 'score_5 \n', 'score_6 \n', 'score_7 \n',
@@ -464,15 +681,47 @@ def faithful(args, embedding_test, mask_test, text_test, labels_test, model, k=1
         writer.writerows(explained_test_samples)
 
 
+def remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train):
+    #if prototype is weighted wrongly, delete it and retrain only last fc layer
+    protos_del = []
+    proto_info, proto_texts, _ = get_nearest(args, model, train_batches_unshuffled, text_train, labels_train)
+    weights = model.get_proto_weights()
+    s = 'label'
+    proto_labels = torch.tensor([int(p[p.index(s) + len(s) + 1]) for p in proto_info])
+    proto_labels = torch.stack((1 - proto_labels, proto_labels), dim=1)
+    proto_labels = proto_labels.argmax(dim=1)
+    weights = np.argmin(weights, axis=1)
+    # if index of max in weights is not the same as the label, add to list of prototypes to delete
+    protos_del = [i for i, (w, l) in enumerate(zip(weights, proto_labels)) if w != l]
+    if len(protos_del) > 0:
+        print('Deleting wrong prototypes:', protos_del)
+        args, model = remove_prototypes(args, protos_del, model, use_cos=False)
+        args.model_path = os.path.join(os.path.dirname(args.model_path), 'reduced_best_model.pth.tar')
+        args.num_epochs = 100
+        args.project = False
+        model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
+                  labels_train)
+    else:
+        print('No wrong prototypes found')
+        
+    args.num_prototypes = model.num_prototypes
+    
+    return model
+
+
 if __name__ == '__main__':
     # torch.manual_seed(0)
     # np.random.seed(0)
     torch.set_num_threads(6)
     args = parser.parse_args()
 
-    rtpt = RTPT(name_initials='FF', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
+    rtpt = RTPT(name_initials='PK', experiment_name='Proto-Trex', max_iterations=args.num_epochs)
     rtpt.start()
 
+    #if args.data_name == 'restaurant':
+    #    preprocess_restaurant(args)
+    #if args.data_name == 'jigsaw':
+    #    preprocess_jigsaw(args)
     text_train, text_val, text_test, labels_train, labels_val, labels_test = load_data(args)
 
     # set class weights for balanced loss computation
@@ -480,10 +729,16 @@ if __name__ == '__main__':
 
     if args.num_prototypes % args.num_classes:
         print('number of prototypes should be divisible by number of classes')
-        args.num_prototypes -= args.num_prototypes % args.num_classes
+        # args.num_prototypes -= args.num_prototypes % args.num_classes
     # define which prototype belongs to which class (onehot encoded matrix)
     args.prototype_class_identity = torch.eye(args.num_classes).repeat(args.num_prototypes // args.num_classes, 1
                                                                        ).to(f'cuda:{args.gpu[0]}')
+
+    # compute class distribution once
+    class_counts = Counter(labels_train)
+    args.dataset_class_distribution = {i: class_counts[i] / len(labels_train) for i in range(args.num_classes)}
+    args.dataset_class_distribution = torch.tensor(list(args.dataset_class_distribution.values()), dtype=torch.float32).unsqueeze(0)
+    print("dataset_class_distribution:", args.dataset_class_distribution)
 
     model = []
     if args.level == 'word':
@@ -528,7 +783,7 @@ if __name__ == '__main__':
                                                batch_size=args.batch_size, shuffle=False, pin_memory=True,
                                                num_workers=0)
 
-    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M_{args.num_prototypes}_{fname}_{args.proto_size}_'
+    time_stmp = datetime.datetime.now().strftime(f'%m-%d %H:%M:%S_{args.num_prototypes}_{fname}_{args.data_name}_{args.proto_size}_'
                                                  f'{args.attn}_{args.metric}_{args.pid}')
     args.model_path = os.path.join('./experiments/train_results/', time_stmp, 'best_model.pth.tar')
 
@@ -536,25 +791,24 @@ if __name__ == '__main__':
         os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
         model = train(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train,
                       labels_train)
+        model = remove_false(args, train_batches, val_batches, model, embedding_train, train_batches_unshuffled, text_train, labels_train)
     if not os.path.exists(args.model_path):
-        load_path = './experiments/train_results/*'
-        model_paths = glob.glob(os.path.join(load_path, 'best_model.pth.tar'))
+        #load latest model path with given amount of prototypes if it exists
+        model_paths = glob.glob(f'./experiments/train_results/*_{fname}_{args.data_name}_*/*best_model.pth.tar')
         model_paths.sort()
         args.model_path = model_paths[-1]
-        args.model_path = './experiments/train_results/10-21 08:16_10_GPTJ_10_False_cosine_/best_model.pth.tar'
         checkpoint = torch.load(args.model_path)
         model.load_state_dict(checkpoint['state_dict'])
     if 'test' in args.mode:
         test(args, embedding_train, mask_train, train_batches_unshuffled, test_batches, labels_train, text_train, model)
     if 'query' in args.mode:
         query(args, train_batches_unshuffled, labels_train, text_train, model)
-    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode \
-            or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode:
-        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = \
-            interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train,
-                     test_batches, labels_train, text_train, model)
+    if 'add' in args.mode or 'remove' in args.mode or 'finetune' in args.mode or 'reinitialize' in args.mode or 'prune' in args.mode or 'replace' in args.mode or 'soft' in args.mode or 'unique' in args.mode or 'robustness' in args.mode:
+        args, model, embedding_train, mask_train, text_train, labels_train, train_batches_unshuffled = interact(args, train_batches, mask_train, train_batches_unshuffled, val_batches, embedding_train, test_batches, labels_train, text_train, model)
     if 'explain' in args.mode:
         explain(args, embedding_test, mask_test, text_test, labels_test, model, train_batches_unshuffled, text_train,
                 labels_train)
     if 'faithful' in args.mode:
         faithful(args, embedding_test, mask_test, text_test, labels_test, model)
+    if 'survey' in args.mode:
+        survey(args, train_batches_unshuffled, labels_train, text_train, text_test, labels_test, model)
