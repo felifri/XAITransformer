@@ -1385,7 +1385,12 @@ def plot_robustness(path):
     plt.title(f"{type.capitalize()} Replacement")
     plt.xlabel("Percentage of Replacements")
     plt.ylabel("Accuracy")
+
+    # Add horizontal line at 50% accuracy
+    plt.axhline(y=50, color='r', linestyle='--', label='Random', alpha=0.5)
+    
     plt.legend(title="Reinit, Epochs")
+
     basedir = os.path.dirname(path)
     plt.savefig(basedir + f"/robustness_{type}.png")
 
