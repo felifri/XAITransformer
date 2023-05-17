@@ -31,3 +31,17 @@ To interact with the model, you first need to train a model. After the training 
 python run_proto_nlp.py --data_name rt-polarity --level sentence --language_model SentBert --mode replace
 ```
 The mode sets the interaction type you want to apply. In the core file you can refine the interaction method, i.e. set e.g. the prototype you want to remove or replace. The last trained model is automatically selected for the interaction. If you trained several models and want to interact with a certain one, the path has to be set manually.
+
+
+## Citation
+If you like or use our work please cite us:
+```bibtex
+@inproceedings{friedrich2022hhai,
+    title={Interactively Providing Explanations for Transformer Language Models},
+    author={Felix Friedrich and Patrick Schramowski and Christopher Tauchmann and Kristian Kersting},
+    year={2022},
+    Keywords = {Transformer, Large Language Models, Prototype Layers, Explainable AI, Explanatory Interactive Learning},
+    booktitle= {Proceedings of the 1st Conference of Hybrid Human Artificial Intelligence (HHAI) and in Frontiers in Artificial Intelligence and Applications}
+}   
+```
+<!-- #endregion -->
